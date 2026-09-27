@@ -1,0 +1,1404 @@
+--[[
+    Larp Your Character! | Auto Script  (v2 — Mobile-Ready UI)
+    Features: Auto Crates, Auto Minigame, Auto Rebirth, Auto Titles, Auto Rewards
+    UI: draggable, touch-friendly, safe-area aware, floating toggle button
+]]
+
+--=============================================================
+-- SERVICES
+--=============================================================
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService      = game:GetService("TweenService")
+local UserInputService  = game:GetService("UserInputService")
+local HttpService       = game:GetService("HttpService")
+local TeleportService   = game:GetService("TeleportService")
+local GuiService        = game:GetService("GuiService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+
+--=============================================================
+-- REMOTE RESOLUTION
+--=============================================================
+local Remotes = {}
+
+local SEARCH_ROOTS = {
+    ReplicatedStorage,
+    ReplicatedStorage:FindFirstChild("Remotes"),
+    ReplicatedStorage:FindFirstChild("Events"),
+    ReplicatedStorage:FindFirstChild("RemoteEvents"),
+    ReplicatedStorage:FindFirstChild("Net"),
+}
+
+local function GetRemote(name, className)
+    className = className or "RemoteEvent"
+    for _, root in ipairs(SEARCH_ROOTS) do
+        if root then
+            local r = root:FindFirstChild(name)
+            if r and r:IsA(className) then
+                Remotes[name] = r
+                return r
+            end
+        end
+    end
+    -- brief wait as last resort
+    local r = ReplicatedStorage:WaitForChild(name, 3)
+    if r and r:IsA(className) then
+        Remotes[name] = r
+        return r
+    end
+    warn("[Larp Auto] Remote not found: " .. name .. " (" .. className .. ")")
+    return nil
+end
+
+-- RemoteEvents
+for _, n in ipairs({
+    "BuyCrateEvent","RebirthEvent","TradeTitleEvent","UpgradeEvent","EquipEvent",
+    "EmoteEvent","RedeemCodeEvent","PurchaseEvent","ToggleAutoRebirth",
+    "TutorialCompletedEvent","MIH",
+}) do GetRemote(n) end
+
+-- RemoteFunctions
+for _, n in ipairs({
+    "ClaimCashRunOrb","CraftRequest","ClaimReward","ClaimIndexReward","CheckIndexRewards",
+    "ClaimFollowBoost","CheckPassRemote","ClaimGemRunOrb","CheckItemOwned","GetPlaytimeFunction",
+    "AdminGiveRequest","AdminGetOnlinePlayers","AdminBanRequest","AdminBanHistoryRequest",
+    "AdminKickRequest","AdminUnbanRequest",
+}) do GetRemote(n, "RemoteFunction") end
+
+--=============================================================
+-- STATE
+--=============================================================
+local State = {
+    AutoBuyCrates    = false,
+    SelectedCrate    = "Common Crate",
+    AutoMinigame     = false,
+    SelectedMinigame = "Hakari",
+    AutoRebirth      = false,
+    AutoTitles       = false,
+    AutoClaimRewards = false,
+
+    CratePrices = {
+        ["Common Crate"]    = 100,
+        ["Rare Crate"]      = 500,
+        ["Epic Crate"]      = 2000,
+        ["Legendary Crate"] = 10000,
+        ["Mythic Crate"]    = 50000,
+    },
+
+    Minigames = {
+        "Hakari","Naoya","Ryu","Subaru","Yuta","Yuji","Choso","Mahoraga",
+        "John","Rabbit273","Gojo","Sukuna","Thukuna","Inumaki","Megumi","Todo",
+        "Kenjaku","Takaba","Toji","HeartGrapple","Kashimo","HeianSukuna",
+        "Kurourushi","MeiMei","Nobara",
+    },
+
+    Threads = {},
+}
+
+--=============================================================
+-- CONFIG
+--=============================================================
+local CONFIG_FOLDER = "LarpAutoConfig"
+local CONFIG_FILE   = CONFIG_FOLDER .. "/config.json"
+
+local function SaveConfig()
+    pcall(function()
+        if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+        writefile(CONFIG_FILE, HttpService:JSONEncode({
+            AutoBuyCrates    = State.AutoBuyCrates,
+            SelectedCrate    = State.SelectedCrate,
+            AutoMinigame     = State.AutoMinigame,
+            SelectedMinigame = State.SelectedMinigame,
+            AutoRebirth      = State.AutoRebirth,
+            AutoTitles       = State.AutoTitles,
+            AutoClaimRewards = State.AutoClaimRewards,
+        }))
+    end)
+end
+
+local function LoadConfig()
+    pcall(function()
+        if isfile(CONFIG_FILE) then
+            local data = HttpService:JSONDecode(readfile(CONFIG_FILE))
+            if type(data) == "table" then
+                for k, v in pairs(data) do
+                    if State[k] ~= nil then State[k] = v end
+                end
+            end
+        end
+    end)
+end
+LoadConfig()
+
+--=============================================================
+-- SAFE REMOTE CALLS
+--=============================================================
+local function SafeFire(remote, ...)
+    if not remote then return false end
+    local ok, err = pcall(remote.FireServer, remote, ...)
+    if not ok then warn("[Larp Auto] Fire failed: " .. tostring(remote.Name) .. " -> " .. tostring(err)) end
+    return ok
+end
+
+local function SafeInvoke(remote, ...)
+    if not remote then return false, nil end
+    local ok, res = pcall(remote.InvokeServer, remote, ...)
+    if not ok then warn("[Larp Auto] Invoke failed: " .. tostring(remote.Name) .. " -> " .. tostring(res)) end
+    return ok, res
+end
+
+--=============================================================
+-- AUTOMATION
+--=============================================================
+local function BuyCrate(crateName)
+    local patterns = {
+        {crateName},
+        {crateName, 1},
+        {crateName, State.CratePrices[crateName] or 100},
+    }
+    for _, args in ipairs(patterns) do
+        if SafeFire(Remotes.BuyCrateEvent, table.unpack(args)) then
+            task.wait(0.1)
+            return true
+        end
+    end
+    return false
+end
+
+local function StartAutoBuyCrates()
+    if State.Threads.BuyCrates then return end
+    State.AutoBuyCrates = true
+    State.Threads.BuyCrates = task.spawn(function()
+        while State.AutoBuyCrates do
+            BuyCrate(State.SelectedCrate)
+            task.wait(1)
+        end
+        State.Threads.BuyCrates = nil
+    end)
+end
+
+local function StopAutoBuyCrates() State.AutoBuyCrates = false end
+
+local function TriggerMinigame(name)
+    if SafeFire(Remotes.EmoteEvent, name) then return true end
+    if SafeFire(Remotes.MIH, "StartMinigame", name) then return true end
+    if SafeFire(Remotes.PurchaseEvent, "Minigame", name) then return true end
+
+    local model = workspace:FindFirstChild(name .. "Minigame") or workspace:FindFirstChild(name)
+    if model then
+        local cd = model:FindFirstChildWhichIsA("ClickDetector", true)
+        if cd and fireclickdetector then fireclickdetector(cd) return true end
+        local pp = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if pp and fireproximityprompt then fireproximityprompt(pp) return true end
+    end
+    return false
+end
+
+local function StartAutoMinigame()
+    if State.Threads.Minigame then return end
+    State.AutoMinigame = true
+    State.Threads.Minigame = task.spawn(function()
+        while State.AutoMinigame do
+            TriggerMinigame(State.SelectedMinigame)
+            task.wait(5)
+        end
+        State.Threads.Minigame = nil
+    end)
+end
+
+local function StopAutoMinigame() State.AutoMinigame = false end
+
+local function TriggerRebirth()
+    local patterns = {{}, {true}, {LocalPlayer}, {Amount = 1}}
+    for _, args in ipairs(patterns) do
+        if SafeFire(Remotes.RebirthEvent, table.unpack(args)) then return true end
+    end
+    return false
+end
+
+local function StartAutoRebirth()
+    if State.Threads.Rebirth then return end
+    State.AutoRebirth = true
+    State.Threads.Rebirth = task.spawn(function()
+        while State.AutoRebirth do
+            TriggerRebirth()
+            task.wait(2)
+        end
+        State.Threads.Rebirth = nil
+    end)
+end
+
+local function StopAutoRebirth() State.AutoRebirth = false end
+
+local function ClaimTitles()
+    local patterns = {{"ClaimAll"}, {"GetAll"}, {"AutoClaim"}, {}}
+    for _, args in ipairs(patterns) do
+        if SafeFire(Remotes.TradeTitleEvent, table.unpack(args)) then return true end
+    end
+    SafeInvoke(Remotes.ClaimIndexReward, "All")
+    SafeInvoke(Remotes.CheckIndexRewards)
+    return false
+end
+
+local function StartAutoTitles()
+    if State.Threads.Titles then return end
+    State.AutoTitles = true
+    State.Threads.Titles = task.spawn(function()
+        while State.AutoTitles do
+            ClaimTitles()
+            task.wait(10)
+        end
+        State.Threads.Titles = nil
+    end)
+end
+
+local function StopAutoTitles() State.AutoTitles = false end
+
+local function StartAutoClaimRewards()
+    if State.Threads.Rewards then return end
+    State.AutoClaimRewards = true
+    State.Threads.Rewards = task.spawn(function()
+        while State.AutoClaimRewards do
+            SafeInvoke(Remotes.ClaimReward)
+            SafeInvoke(Remotes.CheckIndexRewards)
+            SafeInvoke(Remotes.ClaimIndexReward, "All")
+            SafeInvoke(Remotes.ClaimFollowBoost)
+            SafeInvoke(Remotes.ClaimCashRunOrb)
+            SafeInvoke(Remotes.ClaimGemRunOrb)
+            task.wait(30)
+        end
+        State.Threads.Rewards = nil
+    end)
+end
+
+local function StopAutoClaimRewards() State.AutoClaimRewards = false end
+
+--=============================================================
+-- THEME
+--=============================================================
+local Theme = {
+    Bg        = Color3.fromRGB(15, 15, 19),
+    Bar       = Color3.fromRGB(22, 22, 28),
+    Panel     = Color3.fromRGB(26, 26, 33),
+    Element   = Color3.fromRGB(34, 34, 42),
+    ElementHi = Color3.fromRGB(48, 48, 58),
+    Stroke    = Color3.fromRGB(56, 56, 68),
+    Accent    = Color3.fromRGB(0, 175, 125),
+    AccentDim = Color3.fromRGB(0, 120, 90),
+    Danger    = Color3.fromRGB(205, 70, 70),
+    Text      = Color3.fromRGB(242, 242, 250),
+    SubText   = Color3.fromRGB(150, 150, 170),
+    Font      = Enum.Font.Gotham,
+    FontMed   = Enum.Font.GothamMedium,
+    FontBold  = Enum.Font.GothamBold,
+}
+
+local ROW_H = 48
+local BTN_H = 46
+local PAD   = 10
+
+--=============================================================
+-- SCREEN GUIS
+--=============================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "LarpAutoUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder = 50
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.Parent = PlayerGui
+
+local NotifyGui = Instance.new("ScreenGui")
+NotifyGui.Name = "LarpAutoNotify"
+NotifyGui.ResetOnSpawn = false
+NotifyGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+NotifyGui.DisplayOrder = 200
+NotifyGui.IgnoreGuiInset = true
+NotifyGui.Parent = PlayerGui
+
+--=============================================================
+-- SAFE AREA (top inset for Roblox topbar)
+--=============================================================
+local TOP_INSET = 36
+pcall(function()
+    local ok, topLeft = GuiService:GetGuiInset()
+    if ok and typeof(topLeft) == "Vector2" then TOP_INSET = topLeft.Y end
+end)
+
+--=============================================================
+-- NOTIFICATIONS
+--=============================================================
+local NotifyHolder = Instance.new("Frame")
+NotifyHolder.Name = "NotifyHolder"
+NotifyHolder.AnchorPoint = Vector2.new(0.5, 0)
+NotifyHolder.Position = UDim2.new(0.5, 0, 0, TOP_INSET + 8)
+NotifyHolder.Size = UDim2.new(1, -24, 0, 0)
+NotifyHolder.AutomaticSize = Enum.AutomaticSize.Y
+NotifyHolder.BackgroundTransparency = 1
+NotifyHolder.Parent = NotifyGui
+
+local nhLayout = Instance.new("UIListLayout")
+nhLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+nhLayout.Padding = UDim.new(0, 8)
+nhLayout.SortOrder = Enum.SortOrder.LayoutOrder
+nhLayout.Parent = NotifyHolder
+
+local function Notify(title, text, duration)
+    duration = duration or 3
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(0, 300, 0, 58)
+    card.BackgroundColor3 = Theme.Panel
+    card.BackgroundTransparency = 1
+    card.BorderSizePixel = 0
+    card.Parent = NotifyHolder
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = card
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Theme.Stroke
+    stroke.Thickness = 1
+    stroke.Transparency = 1
+    stroke.Parent = card
+
+    local accent = Instance.new("Frame")
+    accent.Size = UDim2.new(0, 4, 1, -16)
+    accent.Position = UDim2.new(0, 0, 0, 8)
+    accent.BackgroundColor3 = Theme.Accent
+    accent.BorderSizePixel = 0
+    accent.Parent = card
+    local ac = Instance.new("UICorner")
+    ac.CornerRadius = UDim.new(1, 0)
+    ac.Parent = accent
+
+    local t1 = Instance.new("TextLabel")
+    t1.Size = UDim2.new(1, -24, 0, 20)
+    t1.Position = UDim2.new(0, 16, 0, 10)
+    t1.BackgroundTransparency = 1
+    t1.Text = title
+    t1.TextColor3 = Theme.Text
+    t1.TextSize = 14
+    t1.Font = Theme.FontBold
+    t1.TextXAlignment = Enum.TextXAlignment.Left
+    t1.Parent = card
+
+    local t2 = Instance.new("TextLabel")
+    t2.Size = UDim2.new(1, -24, 0, 18)
+    t2.Position = UDim2.new(0, 16, 0, 30)
+    t2.BackgroundTransparency = 1
+    t2.Text = text
+    t2.TextColor3 = Theme.SubText
+    t2.TextSize = 12
+    t2.Font = Theme.Font
+    t2.TextXAlignment = Enum.TextXAlignment.Left
+    t2.TextTruncate = Enum.TextTruncate.AtEnd
+    t2.Parent = card
+
+    TweenService:Create(card, TweenInfo.new(0.2), {BackgroundTransparency = 0}):Play()
+    TweenService:Create(stroke, TweenInfo.new(0.2), {Transparency = 0}):Play()
+
+    task.delay(duration, function()
+        if not card.Parent then return end
+        local a = TweenService:Create(card, TweenInfo.new(0.25), {BackgroundTransparency = 1})
+        local b = TweenService:Create(stroke, TweenInfo.new(0.25), {Transparency = 1})
+        a:Play(); b:Play()
+        a.Completed:Wait()
+        if card.Parent then card:Destroy() end
+    end)
+end
+
+--=============================================================
+-- GLOBAL DRAG HANDLER
+--=============================================================
+local CurrentDrag = nil
+
+local function ComputeClampBounds(frame)
+    local cam = workspace.CurrentCamera
+    local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+    local size = frame.AbsoluteSize
+    local ap = frame.AnchorPoint
+    local minX = ap.X * size.X
+    local maxX = vp.X - size.X + ap.X * size.X
+    local minY = ap.Y * size.Y
+    local maxY = vp.Y - size.Y + ap.Y * size.Y
+    if minX > maxX then local m = (minX + maxX) * 0.5; minX, maxX = m, m end
+    if minY > maxY then local m = (minY + maxY) * 0.5; minY, maxY = m, m end
+    return minX, maxX, minY, maxY
+end
+
+local function BeginDrag(frame, input)
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+       and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    -- Convert any scale-based position to pure offsets for consistent dragging
+    local p = frame.Position
+    if p.X.Scale ~= 0 or p.Y.Scale ~= 0 then
+        local abs = frame.AbsolutePosition
+        local ap = frame.AnchorPoint
+        local sz = frame.AbsoluteSize
+        frame.Position = UDim2.fromOffset(abs.X + ap.X * sz.X, abs.Y + ap.Y * sz.Y)
+    end
+    CurrentDrag = {
+        frame  = frame,
+        startX = frame.Position.X.Offset,
+        startY = frame.Position.Y.Offset,
+        inputX = input.Position.X,
+        inputY = input.Position.Y,
+    }
+end
+
+UserInputService.InputChanged:Connect(function(input)
+    if not CurrentDrag then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement
+       and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    local frame = CurrentDrag.frame
+    if not frame or not frame.Parent then CurrentDrag = nil; return end
+
+    local dx = input.Position.X - CurrentDrag.inputX
+    local dy = input.Position.Y - CurrentDrag.inputY
+    local ox = CurrentDrag.startX + dx
+    local oy = CurrentDrag.startY + dy
+
+    local minX, maxX, minY, maxY = ComputeClampBounds(frame)
+    frame.Position = UDim2.fromOffset(
+        math.clamp(ox, minX, maxX),
+        math.clamp(oy, minY, maxY)
+    )
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        CurrentDrag = nil
+    end
+end)
+
+local function MakeDraggable(frame, handle)
+    handle = handle or frame
+    handle.InputBegan:Connect(function(input)
+        BeginDrag(frame, input)
+    end)
+end
+
+--=============================================================
+-- SELECTOR MODAL (mobile-friendly dropdown)
+--=============================================================
+local function OpenSelector(titleText, options, current, onSelect)
+    local overlay = Instance.new("TextButton")
+    overlay.Size = UDim2.fromScale(1, 1)
+    overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+    overlay.BackgroundTransparency = 0.5
+    overlay.Text = ""
+    overlay.AutoButtonColor = false
+    overlay.ZIndex = 100
+    overlay.Parent = ScreenGui
+
+    local panel = Instance.new("Frame")
+    panel.AnchorPoint = Vector2.new(0.5, 0.5)
+    panel.Position = UDim2.new(0.5, 0, 0.5, 0)
+    panel.Size = UDim2.new(0.9, 0, 0.8, 0)
+    panel.BackgroundColor3 = Theme.Panel
+    panel.BorderSizePixel = 0
+    panel.Active = true
+    panel.ZIndex = 101
+    panel.Parent = overlay
+
+    local pSize = Instance.new("UISizeConstraint")
+    pSize.MaxSize = Vector2.new(360, 460)
+    pSize.MinSize = Vector2.new(220, 220)
+    pSize.Parent = panel
+
+    local pCorner = Instance.new("UICorner")
+    pCorner.CornerRadius = UDim.new(0, 12)
+    pCorner.Parent = panel
+
+    local pStroke = Instance.new("UIStroke")
+    pStroke.Color = Theme.Stroke
+    pStroke.Thickness = 1
+    pStroke.Parent = panel
+
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, 0, 0, 48)
+    header.BackgroundColor3 = Theme.Bar
+    header.BorderSizePixel = 0
+    header.ZIndex = 102
+    header.Parent = panel
+    local hc = Instance.new("UICorner"); hc.CornerRadius = UDim.new(0, 12); hc.Parent = header
+    local hCover = Instance.new("Frame")
+    hCover.Size = UDim2.new(1, 0, 0, 12)
+    hCover.Position = UDim2.new(0, 0, 1, -12)
+    hCover.BackgroundColor3 = Theme.Bar
+    hCover.BorderSizePixel = 0
+    hCover.ZIndex = 102
+    hCover.Parent = header
+
+    local hLabel = Instance.new("TextLabel")
+    hLabel.Size = UDim2.new(1, -70, 1, 0)
+    hLabel.Position = UDim2.new(0, 16, 0, 0)
+    hLabel.BackgroundTransparency = 1
+    hLabel.Text = titleText
+    hLabel.TextColor3 = Theme.Text
+    hLabel.TextSize = 15
+    hLabel.Font = Theme.FontBold
+    hLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hLabel.ZIndex = 102
+    hLabel.Parent = header
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 34, 0, 34)
+    closeBtn.Position = UDim2.new(1, -42, 0.5, -17)
+    closeBtn.BackgroundColor3 = Theme.Element
+    closeBtn.Text = "✕"
+    closeBtn.TextColor3 = Theme.Text
+    closeBtn.TextSize = 16
+    closeBtn.Font = Theme.FontBold
+    closeBtn.AutoButtonColor = false
+    closeBtn.BorderSizePixel = 0
+    closeBtn.ZIndex = 103
+    closeBtn.Parent = header
+    local cc = Instance.new("UICorner"); cc.CornerRadius = UDim.new(0, 8); cc.Parent = closeBtn
+
+    local list = Instance.new("ScrollingFrame")
+    list.Size = UDim2.new(1, -16, 1, -64)
+    list.Position = UDim2.new(0, 8, 0, 56)
+    list.BackgroundTransparency = 1
+    list.BorderSizePixel = 0
+    list.ScrollBarThickness = 4
+    list.ScrollBarImageColor3 = Theme.Stroke
+    list.ScrollingDirection = Enum.ScrollingDirection.Y
+    list.CanvasSize = UDim2.new(0, 0, 0, 0)
+    list.ZIndex = 102
+    list.Parent = panel
+
+    local lLayout = Instance.new("UIListLayout")
+    lLayout.Padding = UDim.new(0, 6)
+    lLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    lLayout.Parent = list
+
+    local lPad = Instance.new("UIPadding")
+    lPad.PaddingTop = UDim.new(0, 4)
+    lPad.PaddingBottom = UDim.new(0, 12)
+    lPad.PaddingRight = UDim.new(0, 6)
+    lPad.Parent = list
+
+    local function refreshCanvas()
+        list.CanvasSize = UDim2.new(0, 0, 0, lLayout.AbsoluteContentSize.Y + 20)
+    end
+    lLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(refreshCanvas)
+
+    local function close() overlay:Destroy() end
+
+    for i, opt in ipairs(options) do
+        local isCurrent = (opt == current)
+        local optBtn = Instance.new("TextButton")
+        optBtn.Size = UDim2.new(1, 0, 0, 44)
+        optBtn.BackgroundColor3 = isCurrent and Theme.Accent or Theme.Element
+        optBtn.Text = tostring(opt)
+        optBtn.TextColor3 = isCurrent and Color3.new(1, 1, 1) or Theme.Text
+        optBtn.TextSize = 14
+        optBtn.Font = isCurrent and Theme.FontBold or Theme.Font
+        optBtn.AutoButtonColor = false
+        optBtn.BorderSizePixel = 0
+        optBtn.LayoutOrder = i
+        optBtn.ZIndex = 103
+        optBtn.Parent = list
+
+        local oc = Instance.new("UICorner"); oc.CornerRadius = UDim.new(0, 8); oc.Parent = optBtn
+        local os = Instance.new("UIStroke")
+        os.Color = isCurrent and Theme.Accent or Theme.Stroke
+        os.Thickness = 1
+        os.Parent = optBtn
+
+        optBtn.MouseButton1Down:Connect(function()
+            optBtn.BackgroundColor3 = Theme.ElementHi
+        end)
+        optBtn.MouseButton1Up:Connect(function()
+            optBtn.BackgroundColor3 = isCurrent and Theme.Accent or Theme.Element
+        end)
+        optBtn.MouseButton1Click:Connect(function()
+            onSelect(opt)
+            close()
+        end)
+    end
+
+    closeBtn.MouseButton1Click:Connect(close)
+    overlay.MouseButton1Click:Connect(close)
+
+    task.defer(refreshCanvas)
+end
+
+--=============================================================
+-- UI ELEMENT CREATORS
+--=============================================================
+local function CreateSection(parent, title, order)
+    local holder = Instance.new("Frame")
+    holder.Size = UDim2.new(1, 0, 0, 26)
+    holder.BackgroundTransparency = 1
+    holder.LayoutOrder = order or 0
+    holder.Parent = parent
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.fromScale(1, 1)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = string.upper(title)
+    lbl.TextColor3 = Theme.SubText
+    lbl.TextSize = 12
+    lbl.Font = Theme.FontBold
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = holder
+
+    return holder
+end
+
+local function CreateToggle(parent, text, default, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, ROW_H)
+    row.BackgroundColor3 = Theme.Element
+    row.BorderSizePixel = 0
+    row.Parent = parent
+
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 10); c.Parent = row
+    local s = Instance.new("UIStroke"); s.Color = Theme.Stroke; s.Thickness = 1; s.Parent = row
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -90, 1, 0)
+    label.Position = UDim2.new(0, 14, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = Theme.Text
+    label.TextSize = 14
+    label.Font = Theme.Font
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.Parent = row
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 54, 0, 30)
+    btn.Position = UDim2.new(1, -68, 0.5, -15)
+    btn.BackgroundColor3 = Theme.ElementHi
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.BorderSizePixel = 0
+    btn.Parent = row
+    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(1, 0); bc.Parent = btn
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 24, 0, 24)
+    knob.Position = UDim2.new(0, 3, 0, 3)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = btn
+    local kc = Instance.new("UICorner"); kc.CornerRadius = UDim.new(1, 0); kc.Parent = knob
+
+    local enabled = default and true or false
+    local function render()
+        TweenService:Create(btn, TweenInfo.new(0.18), {
+            BackgroundColor3 = enabled and Theme.Accent or Theme.ElementHi
+        }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.18), {
+            Position = enabled and UDim2.new(1, -27, 0, 3) or UDim2.new(0, 3, 0, 3)
+        }):Play()
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        enabled = not enabled
+        render()
+        callback(enabled)
+    end)
+    render()
+
+    return {
+        Set = function(v)
+            v = v and true or false
+            if v ~= enabled then enabled = v; render() end
+        end,
+        Get = function() return enabled end,
+    }
+end
+
+local function CreateButton(parent, text, callback, color)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, BTN_H)
+    btn.BackgroundColor3 = color or Theme.Element
+    btn.Text = text
+    btn.TextColor3 = Theme.Text
+    btn.TextSize = 14
+    btn.Font = Theme.FontMed
+    btn.AutoButtonColor = false
+    btn.BorderSizePixel = 0
+    btn.TextTruncate = Enum.TextTruncate.AtEnd
+    btn.Parent = parent
+
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 10); c.Parent = btn
+    local s = Instance.new("UIStroke"); s.Color = Theme.Stroke; s.Thickness = 1; s.Parent = btn
+
+    local base = color or Theme.Element
+    btn.MouseButton1Down:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.08), {BackgroundColor3 = Theme.ElementHi}):Play()
+    end)
+    btn.MouseButton1Up:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundColor3 = base}):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        btn.BackgroundColor3 = base
+    end)
+    btn.MouseButton1Click:Connect(callback)
+    return btn
+end
+
+local function CreateDropdown(parent, labelText, options, default, callback)
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, ROW_H)
+    row.BackgroundColor3 = Theme.Element
+    row.Text = ""
+    row.AutoButtonColor = false
+    row.BorderSizePixel = 0
+    row.Parent = parent
+
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 10); c.Parent = row
+    local s = Instance.new("UIStroke"); s.Color = Theme.Stroke; s.Thickness = 1; s.Parent = row
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0.4, -14, 1, 0)
+    label.Position = UDim2.new(0, 14, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = Theme.Text
+    label.TextSize = 14
+    label.Font = Theme.Font
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = row
+
+    local value = Instance.new("TextLabel")
+    value.Size = UDim2.new(0.6, -44, 1, 0)
+    value.Position = UDim2.new(0.4, 0, 0, 0)
+    value.BackgroundTransparency = 1
+    value.Text = tostring(default)
+    value.TextColor3 = Theme.Accent
+    value.TextSize = 13
+    value.Font = Theme.FontMed
+    value.TextXAlignment = Enum.TextXAlignment.Right
+    value.TextTruncate = Enum.TextTruncate.AtEnd
+    value.Parent = row
+
+    local arrow = Instance.new("TextLabel")
+    arrow.Size = UDim2.new(0, 30, 1, 0)
+    arrow.Position = UDim2.new(1, -34, 0, 0)
+    arrow.BackgroundTransparency = 1
+    arrow.Text = "▾"
+    arrow.TextColor3 = Theme.SubText
+    arrow.TextSize = 16
+    arrow.Font = Theme.FontBold
+    arrow.Parent = row
+
+    local current = default
+
+    row.MouseButton1Down:Connect(function() row.BackgroundColor3 = Theme.ElementHi end)
+    row.MouseButton1Up:Connect(function() row.BackgroundColor3 = Theme.Element end)
+
+    row.MouseButton1Click:Connect(function()
+        OpenSelector(labelText, options, current, function(opt)
+            current = opt
+            value.Text = tostring(opt)
+            callback(opt)
+        end)
+    end)
+
+    return {
+        Set = function(v) current = v; value.Text = tostring(v) end,
+        Get = function() return current end,
+    }
+end
+
+local function CreateInput(parent, labelText, placeholder, default, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, ROW_H)
+    row.BackgroundColor3 = Theme.Element
+    row.BorderSizePixel = 0
+    row.Parent = parent
+
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 10); c.Parent = row
+    local s = Instance.new("UIStroke"); s.Color = Theme.Stroke; s.Thickness = 1; s.Parent = row
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0.36, -14, 1, 0)
+    label.Position = UDim2.new(0, 14, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = Theme.Text
+    label.TextSize = 14
+    label.Font = Theme.Font
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = row
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0.64, -20, 0, 34)
+    box.Position = UDim2.new(0.36, 0, 0.5, -17)
+    box.BackgroundColor3 = Theme.Panel
+    box.Text = default or ""
+    box.PlaceholderText = placeholder or ""
+    box.TextColor3 = Theme.Text
+    box.PlaceholderColor3 = Theme.SubText
+    box.TextSize = 13
+    box.Font = Theme.Font
+    box.BorderSizePixel = 0
+    box.ClearTextOnFocus = false
+    box.TextTruncate = Enum.TextTruncate.AtEnd
+    box.Parent = row
+
+    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 8); bc.Parent = box
+    local bs = Instance.new("UIStroke"); bs.Color = Theme.Stroke; bs.Thickness = 1; bs.Parent = box
+
+    box.Focused:Connect(function()
+        TweenService:Create(bs, TweenInfo.new(0.15), {Color = Theme.Accent}):Play()
+    end)
+    box.FocusLost:Connect(function(entered)
+        TweenService:Create(bs, TweenInfo.new(0.15), {Color = Theme.Stroke}):Play()
+        callback(box.Text, entered)
+    end)
+
+    return box
+end
+
+--=============================================================
+-- MAIN WINDOW
+--=============================================================
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+MainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+MainFrame.Size = UDim2.new(1, -24, 1, -(TOP_INSET + 24))
+MainFrame.BackgroundColor3 = Theme.Bg
+MainFrame.BorderSizePixel = 0
+MainFrame.ClipsDescendants = true
+MainFrame.Active = true
+MainFrame.Visible = true
+MainFrame.Parent = ScreenGui
+
+local frameSize = Instance.new("UISizeConstraint")
+frameSize.MaxSize = Vector2.new(560, 500)
+frameSize.MinSize = Vector2.new(260, 240)
+frameSize.Parent = MainFrame
+
+local mCorner = Instance.new("UICorner"); mCorner.CornerRadius = UDim.new(0, 14); mCorner.Parent = MainFrame
+local mStroke = Instance.new("UIStroke"); mStroke.Color = Theme.Stroke; mStroke.Thickness = 1; mStroke.Parent = MainFrame
+
+-- Header
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 46)
+TitleBar.BackgroundColor3 = Theme.Bar
+TitleBar.BorderSizePixel = 0
+TitleBar.Active = true
+TitleBar.Parent = MainFrame
+
+local tbCorner = Instance.new("UICorner"); tbCorner.CornerRadius = UDim.new(0, 14); tbCorner.Parent = TitleBar
+local tbCover = Instance.new("Frame")
+tbCover.Size = UDim2.new(1, 0, 0, 14)
+tbCover.Position = UDim2.new(0, 0, 1, -14)
+tbCover.BackgroundColor3 = Theme.Bar
+tbCover.BorderSizePixel = 0
+tbCover.Parent = TitleBar
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -110, 1, 0)
+TitleLabel.Position = UDim2.new(0, 16, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Larp Your Character!"
+TitleLabel.TextColor3 = Theme.Text
+TitleLabel.TextSize = 15
+TitleLabel.Font = Theme.FontBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+TitleLabel.Parent = TitleBar
+
+local HideBtn = Instance.new("TextButton")
+HideBtn.Size = UDim2.new(0, 34, 0, 34)
+HideBtn.Position = UDim2.new(1, -80, 0.5, -17)
+HideBtn.BackgroundColor3 = Theme.Element
+HideBtn.Text = "—"
+HideBtn.TextColor3 = Theme.Text
+HideBtn.TextSize = 16
+HideBtn.Font = Theme.FontBold
+HideBtn.AutoButtonColor = false
+HideBtn.BorderSizePixel = 0
+HideBtn.Parent = TitleBar
+local hbc = Instance.new("UICorner"); hbc.CornerRadius = UDim.new(0, 9); hbc.Parent = HideBtn
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 34, 0, 34)
+CloseBtn.Position = UDim2.new(1, -42, 0.5, -17)
+CloseBtn.BackgroundColor3 = Theme.Danger
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 15
+CloseBtn.Font = Theme.FontBold
+CloseBtn.AutoButtonColor = false
+CloseBtn.BorderSizePixel = 0
+CloseBtn.Parent = TitleBar
+local cbc = Instance.new("UICorner"); cbc.CornerRadius = UDim.new(0, 9); cbc.Parent = CloseBtn
+
+MakeDraggable(MainFrame, TitleBar)
+
+-- Tab bar
+local TabBar = Instance.new("ScrollingFrame")
+TabBar.Name = "TabBar"
+TabBar.Size = UDim2.new(1, 0, 0, 46)
+TabBar.Position = UDim2.new(0, 0, 0, 46)
+TabBar.BackgroundColor3 = Theme.Bar
+TabBar.BorderSizePixel = 0
+TabBar.ScrollBarThickness = 0
+TabBar.ScrollingDirection = Enum.ScrollingDirection.X
+TabBar.CanvasSize = UDim2.new(0, 0, 0, 0)
+TabBar.Parent = MainFrame
+
+local tbLayout = Instance.new("UIListLayout")
+tbLayout.FillDirection = Enum.FillDirection.Horizontal
+tbLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+tbLayout.Padding = UDim.new(0, 6)
+tbLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tbLayout.Parent = TabBar
+
+local tbPad = Instance.new("UIPadding")
+tbPad.PaddingLeft = UDim.new(0, 10)
+tbPad.PaddingRight = UDim.new(0, 10)
+tbPad.Parent = TabBar
+
+-- Content
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Name = "Content"
+ContentFrame.Size = UDim2.new(1, -PAD * 2, 1, -(46 + 46 + PAD))
+ContentFrame.Position = UDim2.new(0, PAD, 0, 46 + 46)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+--=============================================================
+-- TAB SYSTEM
+--=============================================================
+local Tabs = {}
+local CurrentTab
+
+local function SelectTab(name)
+    if not Tabs[name] then return end
+    CurrentTab = name
+    for n, tab in pairs(Tabs) do
+        local active = (n == name)
+        tab.Frame.Visible = active
+        TweenService:Create(tab.Button, TweenInfo.new(0.15), {
+            BackgroundColor3 = active and Theme.Accent or Theme.Element,
+            TextColor3       = active and Color3.fromRGB(255, 255, 255) or Theme.SubText,
+        }):Play()
+    end
+end
+
+local function RebuildTabCanvas()
+    for _, tab in pairs(Tabs) do
+        local layout = tab.Frame:FindFirstChildOfClass("UIListLayout")
+        if layout then
+            tab.Frame.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 30)
+        end
+    end
+    -- Also fix the tab bar canvas
+    local list = TabBar:FindFirstChildOfClass("UIListLayout")
+    if list then
+        TabBar.CanvasSize = UDim2.new(0, list.AbsoluteContentSize.X + 24, 0, 0)
+    end
+end
+
+local function CreateTab(name, order)
+    local frame = Instance.new("ScrollingFrame")
+    frame.Name = name .. "Content"
+    frame.Size = UDim2.fromScale(1, 1)
+    frame.BackgroundTransparency = 1
+    frame.BorderSizePixel = 0
+    frame.ScrollBarThickness = 4
+    frame.ScrollBarImageColor3 = Theme.Stroke
+    frame.ScrollingDirection = Enum.ScrollingDirection.Y
+    frame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    frame.Visible = false
+    frame.Parent = ContentFrame
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = frame
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 10)
+    pad.PaddingBottom = UDim.new(0, 30)
+    pad.PaddingRight = UDim.new(0, 6)
+    pad.Parent = frame
+
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(RebuildTabCanvas)
+
+    local btn = Instance.new("TextButton")
+    btn.Name = name .. "Tab"
+    btn.Size = UDim2.new(0, 0, 0, 34)
+    btn.AutomaticSize = Enum.AutomaticSize.X
+    btn.BackgroundColor3 = Theme.Element
+    btn.Text = name
+    btn.TextColor3 = Theme.SubText
+    btn.TextSize = 14
+    btn.Font = Theme.FontMed
+    btn.AutoButtonColor = false
+    btn.BorderSizePixel = 0
+    btn.LayoutOrder = order or 0
+    btn.Parent = TabBar
+
+    local bp = Instance.new("UIPadding")
+    bp.PaddingLeft = UDim.new(0, 16)
+    bp.PaddingRight = UDim.new(0, 16)
+    bp.Parent = btn
+
+    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 9); bc.Parent = btn
+
+    btn.MouseButton1Click:Connect(function() SelectTab(name) end)
+
+    Tabs[name] = { Frame = frame, Button = btn }
+    return frame
+end
+
+--=============================================================
+-- TAB : MAIN
+--=============================================================
+local MainTab = CreateTab("Main", 1)
+
+CreateSection(MainTab, "Auto Buy Crates", 1)
+CreateToggle(MainTab, "Auto Buy Crates", State.AutoBuyCrates, function(v)
+    State.AutoBuyCrates = v
+    if v then StartAutoBuyCrates() else StopAutoBuyCrates() end
+    SaveConfig()
+    Notify("Auto Crates", v and ("Buying " .. State.SelectedCrate) or "Stopped")
+end)
+CreateDropdown(MainTab, "Crate",
+    {"Common Crate","Rare Crate","Epic Crate","Legendary Crate","Mythic Crate"},
+    State.SelectedCrate, function(v)
+        State.SelectedCrate = v
+        SaveConfig()
+        Notify("Crate", "Selected: " .. v)
+    end)
+
+CreateSection(MainTab, "Auto Minigame (Larp)", 2)
+CreateToggle(MainTab, "Auto Minigame", State.AutoMinigame, function(v)
+    State.AutoMinigame = v
+    if v then StartAutoMinigame() else StopAutoMinigame() end
+    SaveConfig()
+    Notify("Auto Minigame", v and ("Playing " .. State.SelectedMinigame) or "Stopped")
+end)
+CreateDropdown(MainTab, "Character", State.Minigames, State.SelectedMinigame, function(v)
+    State.SelectedMinigame = v
+    SaveConfig()
+    Notify("Minigame", "Selected: " .. v)
+end)
+
+CreateSection(MainTab, "Auto Rebirth & Titles", 3)
+CreateToggle(MainTab, "Auto Rebirth", State.AutoRebirth, function(v)
+    State.AutoRebirth = v
+    if v then StartAutoRebirth() else StopAutoRebirth() end
+    SaveConfig()
+    Notify("Auto Rebirth", v and "Started" or "Stopped")
+end)
+CreateToggle(MainTab, "Auto Get Titles", State.AutoTitles, function(v)
+    State.AutoTitles = v
+    if v then StartAutoTitles() else StopAutoTitles() end
+    SaveConfig()
+    Notify("Auto Titles", v and "Started" or "Stopped")
+end)
+CreateToggle(MainTab, "Auto Claim All Rewards", State.AutoClaimRewards, function(v)
+    State.AutoClaimRewards = v
+    if v then StartAutoClaimRewards() else StopAutoClaimRewards() end
+    SaveConfig()
+    Notify("Auto Rewards", v and "Started" or "Stopped")
+end)
+
+CreateSection(MainTab, "Quick Actions", 4)
+CreateButton(MainTab, "Rebirth Once", function()
+    TriggerRebirth(); Notify("Rebirth", "Triggered")
+end)
+CreateButton(MainTab, "Claim All Titles Now", function()
+    ClaimTitles(); Notify("Titles", "Attempted to claim all")
+end)
+CreateButton(MainTab, "Toggle Server Auto Rebirth", function()
+    SafeFire(Remotes.ToggleAutoRebirth); Notify("Rebirth", "Toggled server auto rebirth")
+end)
+
+--=============================================================
+-- TAB : SHOP
+--=============================================================
+local ShopTab = CreateTab("Shop", 2)
+CreateSection(ShopTab, "Crates", 1)
+for name, price in pairs(State.CratePrices) do
+    CreateButton(ShopTab, "Buy " .. name .. "  •  " .. price, function()
+        BuyCrate(name); Notify("Shop", "Attempted to buy " .. name)
+    end)
+end
+CreateSection(ShopTab, "Upgrades", 2)
+CreateButton(ShopTab, "Upgrade Damage", function() SafeFire(Remotes.UpgradeEvent, "Damage"); Notify("Upgrade","Damage") end)
+CreateButton(ShopTab, "Upgrade Speed",  function() SafeFire(Remotes.UpgradeEvent, "Speed");  Notify("Upgrade","Speed")  end)
+CreateButton(ShopTab, "Upgrade Health", function() SafeFire(Remotes.UpgradeEvent, "Health"); Notify("Upgrade","Health") end)
+CreateButton(ShopTab, "Upgrade Jump",   function() SafeFire(Remotes.UpgradeEvent, "Jump");   Notify("Upgrade","Jump")   end)
+
+--=============================================================
+-- TAB : MINIGAMES
+--=============================================================
+local MGTab = CreateTab("Minigames", 3)
+CreateSection(MGTab, "Auto Minigame", 1)
+CreateToggle(MGTab, "Auto Minigame", State.AutoMinigame, function(v)
+    State.AutoMinigame = v
+    if v then StartAutoMinigame() else StopAutoMinigame() end
+    SaveConfig()
+    Notify("Auto Minigame", v and ("Playing " .. State.SelectedMinigame) or "Stopped")
+end)
+CreateDropdown(MGTab, "Character", State.Minigames, State.SelectedMinigame, function(v)
+    State.SelectedMinigame = v
+    SaveConfig()
+    Notify("Minigame", "Selected: " .. v)
+end)
+CreateButton(MGTab, "Play Selected Now", function()
+    TriggerMinigame(State.SelectedMinigame)
+    Notify("Minigame", "Triggered " .. State.SelectedMinigame)
+end)
+
+local updateGroups = {
+    { name = "Update 0.5", list = {"Hakari","Naoya","Ryu","Subaru"} },
+    { name = "Update 1.0", list = {"Yuta","Yuji","Choso","Mahoraga"} },
+    { name = "Update 3.0", list = {"John","Rabbit273","Gojo","Sukuna","Thukuna","Inumaki","Megumi","Todo","Kenjaku","Takaba","Toji"} },
+    { name = "Other",      list = {"HeartGrapple","Kashimo","HeianSukuna","Kurourushi","MeiMei","Nobara"} },
+}
+for i, group in ipairs(updateGroups) do
+    CreateSection(MGTab, group.name .. "  (Quick Play)", 10 + i)
+    for _, mg in ipairs(group.list) do
+        CreateButton(MGTab, "▶  " .. mg, function()
+            State.SelectedMinigame = mg
+            TriggerMinigame(mg)
+            Notify("Minigame", "Triggered " .. mg)
+        end)
+    end
+end
+
+--=============================================================
+-- TAB : REBIRTH & TITLES
+--=============================================================
+local RTTab = CreateTab("Rebirth", 4)
+CreateSection(RTTab, "Rebirth", 1)
+CreateToggle(RTTab, "Auto Rebirth", State.AutoRebirth, function(v)
+    State.AutoRebirth = v
+    if v then StartAutoRebirth() else StopAutoRebirth() end
+    SaveConfig()
+    Notify("Auto Rebirth", v and "Started" or "Stopped")
+end)
+CreateButton(RTTab, "Rebirth Once", function() TriggerRebirth(); Notify("Rebirth","Triggered") end)
+CreateButton(RTTab, "Toggle Server Auto Rebirth", function() SafeFire(Remotes.ToggleAutoRebirth); Notify("Rebirth","Toggled") end)
+
+CreateSection(RTTab, "Titles", 2)
+CreateToggle(RTTab, "Auto Claim Titles", State.AutoTitles, function(v)
+    State.AutoTitles = v
+    if v then StartAutoTitles() else StopAutoTitles() end
+    SaveConfig()
+    Notify("Auto Titles", v and "Started" or "Stopped")
+end)
+CreateButton(RTTab, "Claim All Titles Now", function() ClaimTitles(); Notify("Titles","Attempted") end)
+CreateButton(RTTab, "Check Index Rewards", function() SafeInvoke(Remotes.CheckIndexRewards); Notify("Titles","Checked index") end)
+CreateButton(RTTab, "Claim Index Rewards", function() SafeInvoke(Remotes.ClaimIndexReward,"All"); Notify("Titles","Claimed index") end)
+
+CreateSection(RTTab, "Rewards", 3)
+CreateToggle(RTTab, "Auto Claim All Rewards", State.AutoClaimRewards, function(v)
+    State.AutoClaimRewards = v
+    if v then StartAutoClaimRewards() else StopAutoClaimRewards() end
+    SaveConfig()
+    Notify("Auto Rewards", v and "Started" or "Stopped")
+end)
+CreateButton(RTTab, "Claim Reward Now", function() SafeInvoke(Remotes.ClaimReward); Notify("Rewards","Claimed") end)
+
+--=============================================================
+-- TAB : CODES
+--=============================================================
+local CodesTab = CreateTab("Codes", 5)
+CreateSection(CodesTab, "Redeem Code", 1)
+local codeBox = CreateInput(CodesTab, "Code", "Enter code...", "", function() end)
+CreateButton(CodesTab, "Redeem Entered Code", function()
+    local text = codeBox and codeBox.Text or ""
+    if text ~= "" then
+        SafeFire(Remotes.RedeemCodeEvent, text)
+        Notify("Codes", "Redeemed: " .. text)
+    else
+        Notify("Codes", "Enter a code first")
+    end
+end)
+
+CreateSection(CodesTab, "Known Codes", 2)
+for _, code in ipairs({"RELEASE","UPDATE4","LARP","WELCOME","FREE","UPDATE3","UPDATE2","UPDATE1"}) do
+    CreateButton(CodesTab, "Redeem: " .. code, function()
+        SafeFire(Remotes.RedeemCodeEvent, code)
+        Notify("Codes", "Redeemed: " .. code)
+    end)
+end
+
+--=============================================================
+-- TAB : ADMIN
+--=============================================================
+local AdminTab = CreateTab("Admin", 6)
+CreateSection(AdminTab, "Admin Commands (Require Permissions)", 1)
+
+local targetBox = CreateInput(AdminTab, "Target", "Player name...", "", function() end)
+local amountBox = CreateInput(AdminTab, "Amount", "Amount...", "1000", function() end)
+
+local function getTarget() return targetBox and targetBox.Text or "" end
+local function getAmount() return tonumber(amountBox and amountBox.Text) or 1000 end
+
+CreateButton(AdminTab, "Get Online Players", function()
+    local ok, players = SafeInvoke(Remotes.AdminGetOnlinePlayers)
+    if ok and type(players) == "table" then
+        Notify("Admin", "Found " .. #players .. " players (see console)")
+        for _, p in ipairs(players) do print(tostring(p)) end
+    else
+        Notify("Admin", "Failed to fetch players")
+    end
+end)
+CreateButton(AdminTab, "Give Cash",  function() local t = getTarget(); SafeInvoke(Remotes.AdminGiveRequest, t, "Cash", getAmount()); Notify("Admin","Gave cash to "..t) end)
+CreateButton(AdminTab, "Give Gems",  function() local t = getTarget(); SafeInvoke(Remotes.AdminGiveRequest, t, "Gems", getAmount()); Notify("Admin","Gave gems to "..t) end)
+CreateButton(AdminTab, "Kick Player", function() local t = getTarget(); SafeInvoke(Remotes.AdminKickRequest, t); Notify("Admin","Kicked "..t) end)
+CreateButton(AdminTab, "Ban Player",  function() local t = getTarget(); SafeInvoke(Remotes.AdminBanRequest, t);  Notify("Admin","Banned "..t) end)
+CreateButton(AdminTab, "Unban Player",function() local t = getTarget(); SafeInvoke(Remotes.AdminUnbanRequest, t);Notify("Admin","Unbanned "..t) end)
+CreateButton(AdminTab, "View Ban History", function()
+    SafeInvoke(Remotes.AdminBanHistoryRequest)
+    Notify("Admin", "Check console for history")
+end)
+
+--=============================================================
+-- TAB : DEBUG
+--=============================================================
+local DebugTab = CreateTab("Debug", 7)
+CreateSection(DebugTab, "Remote Testing", 1)
+CreateButton(DebugTab, "Test BuyCrateEvent",   function() SafeFire(Remotes.BuyCrateEvent, "Common Crate"); Notify("Debug","Fired BuyCrateEvent") end)
+CreateButton(DebugTab, "Test RebirthEvent",   function() SafeFire(Remotes.RebirthEvent); Notify("Debug","Fired RebirthEvent") end)
+CreateButton(DebugTab, "Test TradeTitleEvent",function() SafeFire(Remotes.TradeTitleEvent, "ClaimAll"); Notify("Debug","Fired TradeTitleEvent") end)
+CreateButton(DebugTab, "Test ClaimReward",    function() SafeInvoke(Remotes.ClaimReward); Notify("Debug","Invoked ClaimReward") end)
+CreateButton(DebugTab, "Test CheckIndexRewards", function() SafeInvoke(Remotes.CheckIndexRewards); Notify("Debug","Invoked CheckIndexRewards") end)
+CreateButton(DebugTab, "Test ClaimCashRunOrb",function() SafeInvoke(Remotes.ClaimCashRunOrb); Notify("Debug","Invoked ClaimCashRunOrb") end)
+CreateButton(DebugTab, "Test ClaimGemRunOrb", function() SafeInvoke(Remotes.ClaimGemRunOrb); Notify("Debug","Invoked ClaimGemRunOrb") end)
+CreateButton(DebugTab, "Test ClaimFollowBoost",function() SafeInvoke(Remotes.ClaimFollowBoost); Notify("Debug","Invoked ClaimFollowBoost") end)
+CreateButton(DebugTab, "Test MIH",            function() SafeFire(Remotes.MIH, "Test"); Notify("Debug","Fired MIH") end)
+CreateButton(DebugTab, "Test EmoteEvent",     function() SafeFire(Remotes.EmoteEvent, "Test"); Notify("Debug","Fired EmoteEvent") end)
+
+CreateSection(DebugTab, "Utility", 2)
+CreateButton(DebugTab, "Reset Character", function() LocalPlayer:LoadCharacter() end)
+CreateButton(DebugTab, "Rejoin Server",   function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+CreateButton(DebugTab, "Save Config",     function() SaveConfig(); Notify("Config","Saved") end)
+CreateButton(DebugTab, "Print Remotes",   function()
+    for name, remote in pairs(Remotes) do
+        print(name .. " = " .. remote:GetFullName())
+    end
+    Notify("Debug","Printed remotes to console")
+end)
+
+--=============================================================
+-- FLOATING TOGGLE BUTTON (mobile)
+--=============================================================
+local Fab = Instance.new("TextButton")
+Fab.Name = "ToggleButton"
+Fab.AnchorPoint = Vector2.new(0, 0)
+Fab.Position = UDim2.new(0, 12, 0, TOP_INSET + 12)
+Fab.Size = UDim2.new(0, 56, 0, 56)
+Fab.BackgroundColor3 = Theme.Accent
+Fab.Text = "⚙"
+Fab.TextColor3 = Color3.fromRGB(255, 255, 255)
+Fab.TextSize = 26
+Fab.Font = Theme.FontBold
+Fab.AutoButtonColor = false
+Fab.BorderSizePixel = 0
+Fab.ZIndex = 20
+Fab.Parent = ScreenGui
+
+local fabCorner = Instance.new("UICorner"); fabCorner.CornerRadius = UDim.new(1, 0); fabCorner.Parent = Fab
+local fabStroke = Instance.new("UIStroke")
+fabStroke.Color = Color3.fromRGB(255, 255, 255)
+fabStroke.Transparency = 0.75
+fabStroke.Thickness = 2
+fabStroke.Parent = Fab
+
+MakeDraggable(Fab, Fab)
+
+-- Distinguish tap from drag on the FAB
+local fabDragStart = nil
+Fab.MouseButton1Down:Connect(function()
+    fabDragStart = Fab.AbsolutePosition
+end)
+Fab.MouseButton1Click:Connect(function()
+    if fabDragStart then
+        local moved = (Fab.AbsolutePosition - fabDragStart).Magnitude
+        fabDragStart = nil
+        if moved > 8 then return end -- it was a drag, ignore tap
+    end
+    MainFrame.Visible = not MainFrame.Visible
+    TweenService:Create(Fab, TweenInfo.new(0.15), {
+        BackgroundColor3 = MainFrame.Visible and Theme.Accent or Theme.ElementHi
+    }):Play()
+end)
+
+-- Pulse indicator when any automation is active
+local fabPulse = false
+task.spawn(function()
+    while Fab.Parent do
+        local anyActive = State.AutoBuyCrates or State.AutoMinigame
+            or State.AutoRebirth or State.AutoTitles or State.AutoClaimRewards
+        if anyActive then
+            fabPulse = not fabPulse
+            TweenService:Create(fabStroke, TweenInfo.new(0.6), {
+                Transparency = fabPulse and 0.2 or 0.9
+            }):Play()
+        else
+            if fabPulse then fabPulse = false end
+            fabStroke.Transparency = 0.75
+        end
+        task.wait(0.6)
+    end
+end)
+
+--=============================================================
+-- BUTTON BEHAVIOUR
+--=============================================================
+HideBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+    Notify("UI", "Hidden — tap the ⚙ button to reopen")
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    for _, thread in pairs(State.Threads) do
+        pcall(task.cancel, thread)
+    end
+    State.AutoBuyCrates = false
+    State.AutoMinigame = false
+    State.AutoRebirth = false
+    State.AutoTitles = false
+    State.AutoClaimRewards = false
+    pcall(function() ScreenGui:Destroy() end)
+    pcall(function() NotifyGui:Destroy() end)
+end)
+
+--=============================================================
+-- INIT
+--=============================================================
+SelectTab("Main")
+task.defer(RebuildTabCanvas)
+
+-- Restore saved toggles
+task.wait(0.4)
+if State.AutoBuyCrates    then StartAutoBuyCrates()    end
+if State.AutoMinigame     then StartAutoMinigame()     end
+if State.AutoRebirth      then StartAutoRebirth()      end
+if State.AutoTitles       then StartAutoTitles()       end
+if State.AutoClaimRewards then StartAutoClaimRewards() end
+
+-- Keyboard shortcut (PC)
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        MainFrame.Visible = not MainFrame.Visible
+    end
+end)
+
+Notify("Larp Auto", "Loaded! Tap ⚙ to toggle the menu.", 5)
+print("[Larp Auto] Loaded. Tap ⚙ (or press RightShift) to toggle the UI.")
