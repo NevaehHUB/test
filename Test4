@@ -1,0 +1,567 @@
+			local function fn11()
+				--[[ ============================================================
+				     L Hub  —  Astra UI bootstrap + Chilli-compatible shim
+				     ============================================================ ]]
+
+				local LHUB_DEBUG = true
+				local function log(...)  if LHUB_DEBUG then print("[L Hub]", ...) end end
+				local function lwarn(...) warn("[L Hub]", ...) end
+
+				-- 1. Load Astra ------------------------------------------------
+				local ok, Astra = pcall(function()
+					local src = game:HttpGet("https://raw.githubusercontent.com/Ali-lov3/AstraUiLib/refs/heads/main/Source.lua")
+					assert(type(src) == "string" and #src > 50, "empty Astra source")
+					local chunk, err = loadstring(src)
+					assert(chunk, "loadstring failed: " .. tostring(err))
+					return chunk()
+				end)
+
+				if not ok or type(Astra) ~= "table" or type(Astra.CreateWindow) ~= "function" then
+					lwarn("Astra UI failed to load:", tostring(Astra))
+					error("L Hub: Astra UI unavailable", 0)
+				end
+				log("Astra UI loaded")
+
+				-- 2. Create Astra window --------------------------------------
+				local AstraWindow = Astra.CreateWindow({
+					Title = "L Hub",
+					Logo = 0,
+					Anonymous = false,
+					ConfigFolder = "LHub",
+				})
+				assert(AstraWindow ~= nil, "L Hub: Astra CreateWindow returned nil")
+				log("Astra window created")
+
+				-- 3. Config tab + manager -------------------------------------
+				pcall(function()
+					local cfgTab = AstraWindow:CreateTab({ Name = "Config", Icon = "settings" })
+					local cfgSection = cfgTab:CreateSection({ Name = "Config Manager", Side = "Left" })
+					if type(cfgSection.ApplyConfigManager) == "function" then
+						cfgSection:ApplyConfigManager({})
+					end
+				end)
+
+				-- 4. Utilities -------------------------------------------------
+				local function color3(v, fallback)
+					if typeof(v) == "Color3" then return v end
+					if type(v) == "string" and #v > 0 then
+						local c_ok, c = pcall(Color3.fromHex, v)
+						if c_ok then return c end
+					end
+					return fallback or Color3.fromRGB(255, 255, 255)
+				end
+
+				local ckCounter = 0
+				local function nextCk(name)
+					ckCounter += 1
+					local clean = tostring(name or "w"):gsub("[^%w]", "_"):sub(1, 28)
+					return "lh_" .. clean .. "_" .. ckCounter
+				end
+
+				-- 5. Tab registry ---------------------------------------------
+				local astraTabs = {}
+				local tabIcons = {
+					Farm = "leaf", Player = "user", Predictor = "activity",
+					Progress = "trending-up", Server = "server", Misc = "settings",
+					Discord = "message-circle", Config = "settings",
+				}
+
+				local function getAstraTab(name)
+					name = tostring(name or "Main")
+					if astraTabs[name] then return astraTabs[name] end
+					local icon = tabIcons[name] or "box"
+					local t_ok, tab = pcall(AstraWindow.CreateTab, AstraWindow, { Name = name, Icon = icon })
+					if not t_ok or tab == nil then
+						lwarn("CreateTab('" .. name .. "') failed:", tostring(tab))
+						return nil
+					end
+					astraTabs[name] = tab
+					log("Created tab:", name)
+					return tab
+				end
+
+				-- 6. Generic widget handle ------------------------------------
+				local function wrapHandle(initial, widget, kind)
+					local h = { _value = initial, _widget = widget, _kind = kind, _subs = {} }
+
+					h.Get = function() return h._value end
+					h.GetValue = h.Get
+
+					h.Set = function(_, v)
+						h._value = v
+						if widget ~= nil and widget ~= true then
+							for _, n in ipairs({ "Set", "SetValue", "SetState", "SetText", "Update", "Change" }) do
+								local f = widget[n]
+								if type(f) == "function" then pcall(f, widget, v); break end
+							end
+						end
+						for i = 1, #h._subs do pcall(h._subs[i], v) end
+					end
+					h.SetValue = h.Set
+
+					h.SetOptions = function(_, options, selected, keep)
+						if widget ~= nil and widget ~= true then
+							for _, n in ipairs({ "SetOptions", "UpdateOptions", "Refresh", "Set" }) do
+								local f = widget[n]
+								if type(f) == "function" then pcall(f, widget, options, selected, keep); break end
+							end
+						end
+					end
+
+					h.JoinExclusiveGroup = function(_, group)
+						if type(group) == "table" and type(group._join) == "function" then group._join(h) end
+					end
+
+					h.GetQuickPath = function() return h._quickPath end
+					h.Subscribe = function(_, f)
+						if type(f) == "function" then h._subs[#h._subs + 1] = f end
+					end
+					return h
+				end
+
+				-- 7. Section ---------------------------------------------------
+				local Section = {}
+
+				local sectionMethodNames = {
+					AddToggle        = { "AddToggle", "Toggle", "CreateToggle" },
+					AddSlider        = { "AddSlider", "Slider", "CreateSlider" },
+					AddDropdown      = { "AddDropdown", "Dropdown", "CreateDropdown" },
+					AddMultiDropdown = { "AddMultiDropdown", "MultiDropdown", "CreateMultiDropdown", "AddDropdown" },
+					AddLabel         = { "AddLabel", "Label", "CreateLabel", "AddText" },
+					AddButton        = { "AddButton", "Button", "CreateButton" },
+					AddInput         = { "AddInput", "Input", "CreateInput", "AddTextBox" },
+				}
+
+				local function sectionMake(self, kind, ...)
+					local astra = self._astra
+					if astra == nil then lwarn("section." .. kind .. ": _astra is nil"); return nil end
+					local names = sectionMethodNames[kind]
+					if not names then return nil end
+					for i = 1, #names do
+						local m = astra[names[i]]
+						if type(m) == "function" then
+							local s_ok, res = pcall(m, astra, ...)
+							if s_ok and res ~= nil then return res end
+							if not s_ok then lwarn("section." .. kind .. " (" .. names[i] .. ") error:", tostring(res)) end
+						end
+					end
+					lwarn("section." .. kind .. ": no method found on Astra section for '" .. tostring((...)) .. "'")
+					return nil
+				end
+
+				function Section:CreateToggle(spec)
+					spec = spec or {}
+					local default = spec.Default == true
+					local handle
+					local widget = sectionMake(self, "AddToggle", {
+						Name = tostring(spec.Name or "Toggle"),
+						Default = default,
+						ConfigKey = nextCk(spec.Name),
+						Callback = function(state)
+							if type(state) ~= "boolean" then state = not not state end
+							handle._value = state
+							for i = 1, #handle._subs do pcall(handle._subs[i], state) end
+							if type(spec.Callback) == "function" then pcall(spec.Callback, state) end
+						end,
+					})
+					handle = wrapHandle(default, widget, "toggle")
+					handle._quickPath = tostring(spec.Name or "Toggle")
+					return handle
+				end
+
+				function Section:CreateSlider(spec)
+					spec = spec or {}
+					local min = tonumber(spec.Min) or 0
+					local max = tonumber(spec.Max) or 100
+					local default = tonumber(spec.Default) or min
+					local handle
+					local widget = sectionMake(self, "AddSlider", {
+						Name = tostring(spec.Name or "Slider"),
+						Min = min, Max = max, Default = default,
+						ConfigKey = nextCk(spec.Name),
+						Callback = function(v)
+							v = tonumber(v) or 0
+							handle._value = v
+							for i = 1, #handle._subs do pcall(handle._subs[i], v) end
+							if type(spec.Callback) == "function" then pcall(spec.Callback, v) end
+						end,
+					})
+					handle = wrapHandle(default, widget, "slider")
+					handle._quickPath = tostring(spec.Name or "Slider")
+					return handle
+				end
+
+				function Section:CreateDropdown(spec)
+					spec = spec or {}
+					local options = spec.Options or {}
+					local default = type(spec.Default) == "string" and spec.Default or options[1]
+					local handle
+					local widget = sectionMake(self, "AddDropdown", {
+						Name = tostring(spec.Name or "Dropdown"),
+						Options = options, Default = default,
+						ConfigKey = nextCk(spec.Name),
+						Callback = function(sel)
+							handle._value = sel
+							for i = 1, #handle._subs do pcall(handle._subs[i], sel) end
+							if type(spec.Callback) == "function" then pcall(spec.Callback, sel) end
+						end,
+					})
+					handle = wrapHandle(default, widget, "dropdown")
+					handle._quickPath = tostring(spec.Name or "Dropdown")
+					return handle
+				end
+
+				function Section:CreateMultiDropdown(spec)
+					spec = spec or {}
+					local options = spec.Options or {}
+					local default = type(spec.Default) == "table" and spec.Default or {}
+					local handle
+					local widget = sectionMake(self, "AddMultiDropdown", {
+						Name = tostring(spec.Name or "Multi Dropdown"),
+						Options = options, Default = default,
+						ConfigKey = nextCk(spec.Name),
+						Callback = function(sel)
+							handle._value = sel
+							for i = 1, #handle._subs do pcall(handle._subs[i], sel) end
+							if type(spec.Callback) == "function" then pcall(spec.Callback, sel) end
+						end,
+					})
+					handle = wrapHandle(default, widget, "multi")
+					handle._quickPath = tostring(spec.Name or "Multi Dropdown")
+					return handle
+				end
+
+				function Section:CreateText(spec)
+					spec = spec or {}
+					local text = tostring(spec.Text or spec.Name or "")
+					local widget = sectionMake(self, "AddLabel", text)
+					local h = wrapHandle(text, widget, "text")
+					h._quickPath = tostring(spec.Name or "Text")
+					return h
+				end
+
+				function Section:CreateLabel(spec)
+					spec = spec or {}
+					local text = tostring(spec.Text or spec.Name or "")
+					local widget = sectionMake(self, "AddLabel", text)
+					return wrapHandle(text, widget, "label")
+				end
+
+				function Section:CreateButton(spec)
+					spec = spec or {}
+					local widget = sectionMake(self, "AddButton", {
+						Name = tostring(spec.Name or "Button"),
+						ConfigKey = nextCk(spec.Name),
+						Callback = function()
+							if type(spec.Callback) == "function" then pcall(spec.Callback) end
+						end,
+					})
+					return wrapHandle(nil, widget, "button")
+				end
+
+				function Section:CreateInput(spec)
+					spec = spec or {}
+					local subs = {}
+					local h = { _value = tostring(spec.Default or ""), _configIgnored = true }
+					h.State = { _registered = true, _configIgnored = true }
+
+					local widget = sectionMake(self, "AddInput", {
+						Name = tostring(spec.Name or "Input"),
+						Placeholder = tostring(spec.Placeholder or ""),
+						Default = h._value,
+						ConfigKey = nextCk(spec.Name),
+						Callback = function(text, entered)
+							text = tostring(text or "")
+							h._value = text
+							for i = 1, #subs do pcall(subs[i], text, entered) end
+							if type(spec.Callback) == "function" then pcall(spec.Callback, text, entered) end
+						end,
+					})
+					h._widget = widget
+					h.Get      = function() return h._value end
+					h.GetValue = h.Get
+					h.GetText  = h.Get
+					h.Set = function(_, v)
+						v = tostring(v or "")
+						h._value = v
+						if widget then
+							for _, n in ipairs({ "Set", "SetValue", "SetText" }) do
+								if type(widget[n]) == "function" then pcall(widget[n], widget, v); break end
+							end
+						end
+					end
+					h.SetValue = h.Set
+					h._controller = {
+						GetValue = function() return h._value end,
+						SetValue = function(v) h.Set(nil, v) end,
+					}
+					h.Subscribe = function(_, f) if type(f) == "function" then subs[#subs + 1] = f end end
+					return h
+				end
+
+				-- 8. Canvas (minimal immediate-mode engine) -------------------
+				local function createCanvas(hostFrame, spec)
+					spec = spec or {}
+					local canvas = { _elements = {}, _onResize = {}, _contentLines = 20 }
+
+					local root = Instance.new("Frame")
+					root.Name = "LHCanvas"
+					root.BackgroundTransparency = 1
+					root.Size = UDim2.new(1, 0, 0, 20 * 14)
+					root.Parent = hostFrame
+
+					local ctx = { unit = 14, widthPx = 300, heightPx = 280 }
+
+					local function px(v) return (tonumber(v) or 0) * ctx.unit end
+
+					local function applyProps(inst, props)
+						if type(props) ~= "table" then return end
+						local x, y = px(props.X), px(props.Y)
+						if props.Position then inst.Position = props.Position
+						elseif props.X or props.Y then inst.Position = UDim2.fromOffset(x, y) end
+						if inst:IsA("GuiObject") and (props.Width or props.Height) then
+							local w, ht = props.Width, props.Height
+							local hOff = ht and px(ht) or ctx.unit
+							if w == nil or w == 1 then inst.Size = UDim2.new(1, -x, 0, hOff)
+							else inst.Size = UDim2.fromOffset(px(w), hOff) end
+						end
+						if props.Visible ~= nil then inst.Visible = props.Visible == true end
+						if props.ZIndex then inst.ZIndex = tonumber(props.ZIndex) or inst.ZIndex end
+						if props.Background then inst.BackgroundColor3 = color3(props.Background, inst.BackgroundColor3) end
+						if props.BackgroundTransparency then inst.BackgroundTransparency = tonumber(props.BackgroundTransparency) or 0 end
+						if props.Transparency then inst.BackgroundTransparency = tonumber(props.Transparency) or 0 end
+
+						if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+							if props.Text then inst.Text = tostring(props.Text) end
+							if props.Color then inst.TextColor3 = color3(props.Color, inst.TextColor3) end
+							if props.Scale then inst.TextSize = math.max(6, ctx.unit * (tonumber(props.Scale) or 1)) end
+							if props.Wrap ~= nil then inst.TextWrapped = props.Wrap == true end
+							if props.TextStrokeTransparency then inst.TextStrokeTransparency = tonumber(props.TextStrokeTransparency) or 0 end
+							inst.TextScaled = false
+							inst.TextYAlignment = Enum.TextYAlignment.Center
+						end
+						if inst:IsA("ImageLabel") or inst:IsA("ImageButton") then
+							if props.Image then inst.Image = tostring(props.Image) end
+							if props.ImageTransparency then inst.ImageTransparency = tonumber(props.ImageTransparency) or 0 end
+						end
+						if props.Corner then
+							local corner = inst:FindFirstChildOfClass("UICorner") or Instance.new("UICorner")
+							corner.Parent = inst
+							corner.CornerRadius = UDim.new(tonumber(props.Corner) or 0, 0)
+						end
+						if props.StrokeColor or props.StrokeThickness or props.StrokeTransparency then
+							local stroke = inst:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+							stroke.Parent = inst
+							stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+							if props.StrokeColor then stroke.Color = color3(props.StrokeColor, stroke.Color) end
+							if props.StrokeThickness then stroke.Thickness = math.max(0.5, (tonumber(props.StrokeThickness) or 0.1) * ctx.unit) end
+							if props.StrokeTransparency then stroke.Transparency = tonumber(props.StrokeTransparency) or 0 end
+						end
+						if props.Gradient then
+							local grad = inst:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
+							grad.Parent = inst
+							if typeof(props.Gradient) == "ColorSequence" then grad.Color = props.Gradient end
+							if props.GradientRotation then grad.Rotation = tonumber(props.GradientRotation) or 90 end
+						end
+					end
+
+					local function makeElement(kind, parent, props)
+						props = props or {}
+						local inst
+						if kind == "frame" then inst = Instance.new("Frame")
+						elseif kind == "text" then inst = Instance.new("TextLabel")
+						elseif kind == "image" then inst = Instance.new("ImageLabel")
+						elseif kind == "button" then inst = Instance.new("TextButton") end
+						inst.Name = "El"
+						inst.BackgroundTransparency = 1
+						inst.BorderSizePixel = 0
+						inst.Parent = parent or root
+						applyProps(inst, props)
+						local handle = {}
+						handle.Instance = inst
+						handle.Set = function(_, p) applyProps(inst, p) end
+						handle.SetRotation = function(_, d) inst.Rotation = tonumber(d) or 0 end
+						handle.SetTransparency = function(_, t) inst.ImageTransparency = tonumber(t) or 0 end
+						handle.SetImageId = function(_, id) inst.Image = "rbxassetid://" .. tostring(id) end
+						handle.Get = function() return inst end
+						if kind == "button" and type(props.Callback) == "function" then
+							inst.Activated:Connect(function() pcall(props.Callback) end)
+						end
+						return handle
+					end
+
+					local function recompute()
+						local w = root.AbsoluteSize.X
+						if w <= 0 then w = hostFrame.AbsoluteSize.X end
+						if w <= 0 then w = 300 end
+						ctx.widthPx = w
+						ctx.unit = math.clamp(w / 26, 10, 22)
+						ctx.heightPx = canvas._contentLines * ctx.unit
+						root.Size = UDim2.new(1, 0, 0, ctx.heightPx)
+						for i = 1, #canvas._onResize do pcall(canvas._onResize[i], canvas, ctx.widthPx, ctx.heightPx) end
+					end
+
+					canvas.Root = function() return root end
+					canvas.Query = function() return "" end
+					canvas.Width = function() return ctx.widthPx end
+					canvas.Height = function() return ctx.heightPx end
+					canvas.Unit = function() return ctx.unit end
+					canvas.TextSize = function() return ctx.unit end
+					canvas.OnResize = function(_, fn) if type(fn) == "function" then canvas._onResize[#canvas._onResize + 1] = fn end end
+					canvas.Dock = function() return root end
+					canvas.SetDock = function() end
+					canvas.SetContentLines = function(_, n) canvas._contentLines = math.max(1, tonumber(n) or 1); recompute() end
+					canvas.Frame  = function(_, props) return makeElement("frame",  props and props.Parent or root, props) end
+					canvas.Text   = function(_, props) return makeElement("text",   props and props.Parent or root, props) end
+					canvas.Image  = function(_, props) return makeElement("image",  props and props.Parent or root, props) end
+					canvas.Button = function(_, props) return makeElement("button", props and props.Parent or root, props) end
+					canvas.Destroy = function() pcall(function() root:Destroy() end) end
+
+					hostFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(recompute)
+					task.defer(recompute)
+					if type(spec.Build) == "function" then
+						task.defer(function() pcall(spec.Build, canvas) end)
+					end
+					return canvas
+				end
+
+				function Section:CreateCanvas(spec)
+					spec = spec or {}
+					local hostFrame
+					local p_ok, probe = pcall(self._astra.AddLabel, self._astra, "")
+					if p_ok and probe then
+						local inst
+						if typeof(probe) == "Instance" then inst = probe
+						elseif type(probe) == "table" then
+							for _, k in ipairs({ "Instance", "Object", "Frame", "Handle", "Root", "Element" }) do
+								if typeof(probe[k]) == "Instance" then inst = probe[k]; break end
+							end
+						end
+						local node = inst
+						while node do
+							if node:IsA("Frame") or node:IsA("ScrollingFrame") then hostFrame = node; break end
+							node = node.Parent
+						end
+					end
+
+					if not hostFrame then
+						local gui = Instance.new("ScreenGui")
+						gui.Name = "LHubCanvas"
+						gui.ResetOnSpawn = false
+						gui.IgnoreGuiInset = true
+						gui.DisplayOrder = 40
+						gui.Parent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+						hostFrame = Instance.new("Frame")
+						hostFrame.Size = UDim2.fromOffset(520, 640)
+						hostFrame.Position = UDim2.fromOffset(360, 60)
+						hostFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+						hostFrame.BackgroundTransparency = 0.15
+						hostFrame.BorderSizePixel = 0
+						hostFrame.Parent = gui
+						local corner = Instance.new("UICorner")
+						corner.CornerRadius = UDim.new(0, 10)
+						corner.Parent = hostFrame
+					end
+
+					return createCanvas(hostFrame, spec)
+				end
+
+				-- 9. Tab -------------------------------------------------------
+				local Tab = {}
+
+				function Tab:CreateSection(spec)
+					spec = spec or {}
+					local side = tostring(spec.Side or "Left")
+					if side ~= "Left" and side ~= "Right" then side = "Left" end
+
+					local s_ok, sec = pcall(self._astra.CreateSection, self._astra, {
+						Name = tostring(spec.Name or "Section"),
+						Side = side,
+					})
+					if not s_ok or sec == nil then
+						lwarn("CreateSection failed for '" .. tostring(spec.Name) .. "':", tostring(sec))
+						return nil
+					end
+					return setmetatable({ _astra = sec }, { __index = Section })
+				end
+
+				-- 10. State / Group / Tab / Window -----------------------------
+				local function makeState(spec)
+					spec = spec or {}
+					local value = spec.Default
+					local subs = {}
+					local h = {}
+					h.Get = function() return value end
+					h.GetValue = h.Get
+					h.Set = function(_, v)
+						value = v
+						for i = 1, #subs do pcall(subs[i], v) end
+					end
+					h.Subscribe = function(_, f) if type(f) == "function" then subs[#subs + 1] = f end end
+					return h
+				end
+
+				local function makeExclusiveGroup(spec)
+					spec = spec or {}
+					local members = {}
+					local maxActive = math.max(1, tonumber(spec.MaxActive) or 1)
+					local group = { _members = members }
+					group._join = function(handle)
+						if not table.find(members, handle) then table.insert(members, handle) end
+						local active = {}
+						for _, m in ipairs(members) do
+							if m ~= handle and m:Get() == true then active[#active + 1] = m end
+						end
+						while #active >= maxActive do
+							local oldest = table.remove(active, 1)
+							if oldest then oldest:Set(false) end
+						end
+					end
+					return group
+				end
+
+				local function makeTab(spec)
+					spec = spec or {}
+					local astra = getAstraTab(spec.Name)
+					if not astra then return nil end
+					local t = setmetatable({ _astra = astra }, { __index = Tab })
+					t.Page = astra.Page or astra.Frame or astra.Holder
+					return t
+				end
+
+				local shim = {}
+				shim.ManualQuickDefaults = {
+					PinnedFeatures = { "Player > Movement > Speed Boost", "Player > Movement > Boost Speed" },
+					Keybinds = { ["Player > Movement > Speed Boost"] = "Q" },
+					PinGroups = {},
+					LeftCenterHidden = true,
+				}
+
+				function shim:CreateWindow(opts)
+					opts = opts or {}
+					local w = {}
+					w._defaultName = tostring(opts.DefaultTab or "Farm")
+					getAstraTab(w._defaultName)
+					w.CreateTab = function(_, tspec) return makeTab(tspec) end
+					w.GetDefaultTab = function() return makeTab({ Name = w._defaultName }) end
+					w.CreateState = function(_, sspec) return makeState(sspec) end
+					w.CreateExclusiveGroup = function(_, gspec) return makeExclusiveGroup(gspec) end
+					return w
+				end
+
+				function shim:Finalize() end
+
+				function shim:Notify(title, text, duration)
+					pcall(function()
+						Astra.Notify({
+							Title = tostring(title or "L Hub"),
+							Text = tostring(text or ""),
+							Icon = "check",
+							Duration = tonumber(duration) or 4,
+						})
+					end)
+				end
+
+				log("L Hub shim ready")
+				return shim
+			end
