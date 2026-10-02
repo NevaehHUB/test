@@ -1,0 +1,1450 @@
+--[[ ==========================================================================
+     L Hub  —  Steal An Egg
+     Astra UI · native (no shim, no Chilli dependency)
+     ========================================================================== ]]
+
+local ok, Astra = pcall(function()
+    local src = game:HttpGet("https://raw.githubusercontent.com/Ali-lov3/AstraUiLib/refs/heads/main/Source.lua")
+    local chunk, err = loadstring(src)
+    assert(chunk, err)
+    return chunk()
+end)
+
+if not ok or type(Astra) ~= "table" or type(Astra.CreateWindow) ~= "function" then
+    warn("[L Hub] Astra failed to load:", Astra)
+    return
+end
+
+-- ============================================================================
+-- Services & shortcuts
+-- ============================================================================
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
+local CoreGui           = game:GetService("CoreGui")
+local TeleportService   = game:GetService("TeleportService")
+local HttpService       = game:GetService("HttpService")
+local CollectionService = game:GetService("CollectionService")
+local TweenService      = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+local networking  = ReplicatedStorage:WaitForChild("Packages", 15)
+networking = networking and networking:WaitForChild("Networking", 10)
+
+local function safeRequire(inst)
+    local ok, res = pcall(function() return require(inst) end)
+    return ok and res or nil
+end
+
+-- ============================================================================
+-- Game modules
+-- ============================================================================
+local Modules = {
+    EggState         = safeRequire(ReplicatedStorage:WaitForChild("Client", 10) and ReplicatedStorage.Client:WaitForChild("EggState", 10)),
+    Assets           = safeRequire(ReplicatedStorage:WaitForChild("Data", 10) and ReplicatedStorage.Data:WaitForChild("Assets", 10)),
+    Areas            = safeRequire(ReplicatedStorage:WaitForChild("Data", 10) and ReplicatedStorage.Data:WaitForChild("Areas", 10)),
+    EggRecords       = safeRequire(ReplicatedStorage.Shared and ReplicatedStorage.Shared:WaitForChild("Util", 10) and ReplicatedStorage.Shared.Util:WaitForChild("EggRecords", 10)),
+    Save             = safeRequire(ReplicatedStorage.Shared and ReplicatedStorage.Shared:WaitForChild("Save", 10)),
+    AreaEggCycle     = safeRequire(ReplicatedStorage.Shared and ReplicatedStorage.Shared:WaitForChild("Util", 10) and ReplicatedStorage.Shared.Util:WaitForChild("AreaEggCycle", 10)),
+    Ragdoll          = safeRequire(ReplicatedStorage.Shared and ReplicatedStorage.Shared:WaitForChild("Modules", 10) and ReplicatedStorage.Shared.Modules:WaitForChild("Ragdoll", 10)),
+    Mutations        = safeRequire(ReplicatedStorage.Shared and ReplicatedStorage.Shared:WaitForChild("Modules", 10) and ReplicatedStorage.Shared.Modules:WaitForChild("Mutations", 10)),
+}
+
+-- ============================================================================
+-- Util
+-- ============================================================================
+local Util = {}
+
+function Util.remote(name, expectClass)
+    if not networking then return nil end
+    local r = networking:FindFirstChild(name)
+    if not r then return nil end
+    if expectClass and not r:IsA(expectClass) then return nil end
+    return r
+end
+
+function Util.invoke(name, ...)
+    local r = Util.remote(name, "RemoteFunction")
+    if not r then return false, nil end
+    local ok, res = pcall(r.InvokeServer, r, ...)
+    return ok, res
+end
+
+function Util.fire(name, ...)
+    local r = Util.remote(name, "RemoteEvent")
+    if not r then return false end
+    return pcall(r.FireServer, r, ...)
+end
+
+function Util.root()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+function Util.humanoid()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+function Util.distanceTo(pos)
+    local root = Util.root()
+    if not root or not pos then return math.huge end
+    return (root.Position - pos).Magnitude
+end
+
+function Util.saveGet()
+    local s = Modules.Save
+    if type(s) ~= "table" then return nil end
+    if type(s.Get) == "function" then
+        local ok, res = pcall(s.Get)
+        if ok then return res end
+    end
+    if type(s.Peek) == "function" then
+        local ok, res = pcall(s.Peek)
+        if ok then return res end
+    end
+    return nil
+end
+
+function Util.readOwnerEggs()
+    local es = Modules.EggState
+    if type(es) ~= "table" or type(es.ReadOwnerEggs) ~= "function" then
+        return {}
+    end
+    local ok, res = pcall(es.ReadOwnerEggs, LocalPlayer.UserId)
+    return ok and type(res) == "table" and res or {}
+end
+
+function Util.readFieldEggs()
+    local es = Modules.EggState
+    if type(es) == "table" and type(es.ReadFieldEggs) == "function" then
+        local ok, res = pcall(es.ReadFieldEggs)
+        if ok and type(res) == "table" and type(res.Records) == "table" then
+            return res.Records
+        end
+    end
+    local snap = Util.invoke("RF/EggWorld/AskFieldEggSnapshot")
+    if type(snap) == "table" and type(snap.Records) == "table" then
+        return snap.Records
+    end
+    return nil
+end
+
+function Util.assetInfo(category)
+    local assets = Modules.Assets
+    if type(assets) ~= "table" or type(assets.Directory) ~= "table" then return nil end
+    return assets.Directory[tostring(category)]
+end
+
+function Util.assetRarity(category)
+    local info = Util.assetInfo(category)
+    if type(info) ~= "table" then return 0 end
+    local rar = info.Rarity
+    if type(rar) ~= "table" then return 0 end
+    return tonumber(rar.RarityNumber or rar.Rank) or 0
+end
+
+function Util.assetName(category)
+    local info = Util.assetInfo(category)
+    if type(info) == "table" and info.DisplayName then
+        return tostring(info.DisplayName)
+    end
+    return tostring(category)
+end
+
+function Util.assetIncome(category, scale)
+    local info = Util.assetInfo(category)
+    if type(info) ~= "table" then return 0 end
+    local rate  = tonumber(info.EarningRate) or 0
+    scale       = tonumber(scale) or 1
+    local mult  = scale > 5 and (scale / 5) ^ 1.2 * 19.637875755794113 or scale ^ 1.85
+    return rate * mult
+end
+
+function Util.notify(title, text, dur)
+    pcall(function()
+        Astra.Notify({
+            Title    = tostring(title or "L Hub"),
+            Text     = tostring(text or ""),
+            Icon     = "check",
+            Duration = tonumber(dur) or 4,
+        })
+    end)
+end
+
+function Util.inBase(pos)
+    pos = pos or (Util.root() and Util.root().Position)
+    if not pos then return false end
+    local world = workspace:FindFirstChild("World") or workspace:FindFirstChild("__OBJECTS")
+    local areas = world and world:FindFirstChild("Areas")
+    local line  = areas and areas:FindFirstChild("SeparationLine")
+    local xCut  = line and line:IsA("BasePart") and line.Position.X or 552
+    return pos.X < xCut
+end
+
+function Util.stealHome()
+    local paths = {
+        { "GearGiver_Slap", "Podium" },
+        { "World", "Machines", "RiftMachine", "Rift", "Meshes/VoidPortal_Cube.003" },
+        { "__OBJECTS", "Machines", "RiftMachine", "Rift", "Meshes/VoidPortal_Cube.003" },
+    }
+    for _, p in ipairs(paths) do
+        local cur = workspace
+        for _, n in ipairs(p) do
+            cur = cur and cur:FindFirstChild(n) or nil
+        end
+        if cur and cur:IsA("BasePart") then
+            local off = p[1] == "GearGiver_Slap" and Vector3.new(-16.415, 21.072, -6.106)
+                       or Vector3.new(-26.776, 1.75, 18.665)
+            return cur.CFrame:PointToWorldSpace(off)
+        end
+    end
+    return Vector3.new(528.7, 70.57, -364.11)
+end
+
+-- ============================================================================
+-- Window & tabs
+-- ============================================================================
+local Window = Astra.CreateWindow({
+    Title        = "L Hub",
+    Logo         = 0,
+    Anonymous    = false,
+    ConfigFolder = "LHub",
+})
+
+local TabFarm      = Window:CreateTab({ Name = "Farm",      Icon = "leaf" })
+local TabPlayer    = Window:CreateTab({ Name = "Player",    Icon = "user" })
+local TabVisuals   = Window:CreateTab({ Name = "Visuals",   Icon = "eye" })
+local TabProgress  = Window:CreateTab({ Name = "Progress",  Icon = "trending-up" })
+local TabServer    = Window:CreateTab({ Name = "Server",    Icon = "server" })
+local TabMisc      = Window:CreateTab({ Name = "Misc",      Icon = "settings" })
+local TabConfig    = Window:CreateTab({ Name = "Config",    Icon = "settings" })
+
+-- Config tab
+do
+    local sec = TabConfig:CreateSection({ Name = "Config Manager", Side = "Left" })
+    if type(sec.ApplyConfigManager) == "function" then
+        pcall(sec.ApplyConfigManager, sec, {})
+    end
+end
+
+-- ============================================================================
+-- Shared state
+-- ============================================================================
+local State = {
+    -- steal
+    Steal             = { Enabled = false, Carrying = false, CarryUid = nil, LastFinished = 0 },
+    Movement          = { Owner = nil },
+    -- filters
+    Areas             = {},
+    MinRarity         = 0,
+    MinValue          = 0,
+    SpecificEggs      = {},
+    Priority          = "Highest Value",
+    -- place
+    Place             = { Enabled = false, Rule = "Always", Order = "Highest Value", MinValue = 0, Rarities = {}, Specific = {} },
+    -- hatch
+    Hatch             = { Enabled = false, MinRarity = 0, MinValue = 0, Specific = {} },
+    -- sell
+    SellEgg           = { Enabled = false, MaxRarity = 0, MinValue = 0, KeepMutated = true, Blacklist = {} },
+    SellPet           = { Enabled = false, MaxRarity = 0, MinValue = 0, KeepMutated = true, Blacklist = {} },
+    -- treadmill
+    Treadmill         = { Enabled = false, Stay = true, Riding = false },
+    -- progression
+    BuyTrail          = false,
+    UpgradeBase       = false,
+    UpgradeTreadmill  = false,
+    AutoClaim         = false,
+    AutoClaimIndex    = false,
+    -- server
+    RejoinOnDC        = true,
+    AutoLoad          = true,
+    HopMode           = "Least Players",
+    -- player
+    SpeedBoost        = false,
+    SpeedValue        = 350,
+    InfiniteJump      = false,
+    AntiRagdoll       = true,
+    AntiTrap          = true,
+    AntiAfk           = true,
+    Invisibility      = false,
+    AntiGuard         = false,
+    -- esp
+    EspEggs           = false,
+    EspEggOwnBase     = true,
+    EspEggMinRarity   = 0,
+    EspGuards         = false,
+    EspPlayers        = false,
+    EspLostParts      = false,
+    -- misc
+    FpsCap            = 240,
+    Optimizer         = false,
+}
+
+-- ============================================================================
+-- Movement ownership
+-- ============================================================================
+local Movement = {}
+function Movement.claim(owner)
+    if State.Movement.Owner == nil or State.Movement.Owner == owner then
+        State.Movement.Owner = owner
+        return true
+    end
+    return false
+end
+function Movement.release(owner)
+    if State.Movement.Owner == owner then
+        State.Movement.Owner = nil
+    end
+end
+
+-- ============================================================================
+-- Egg filters
+-- ============================================================================
+local function eggMatches(record)
+    local category = record.AssetCategory or record.Category
+    if not category then return false end
+    local rarity = Util.assetRarity(category)
+
+    if State.MinRarity > 0 and rarity < State.MinRarity then return false end
+
+    if State.MinValue > 0 then
+        local income = Util.assetIncome(category, record.AssetScale or 1)
+        if income < State.MinValue then return false end
+    end
+
+    if next(State.SpecificEggs) then
+        if not State.SpecificEggs[tostring(category)] then return false end
+    end
+
+    if next(State.Areas) then
+        local areaId = record.AreaId
+        if not areaId or not State.Areas[tostring(areaId)] then return false end
+    end
+
+    return true
+end
+
+local function collectCandidates(includeCarried)
+    local records = Util.readFieldEggs()
+    if not records then return {} end
+    local list = {}
+    for _, rec in pairs(records) do
+        local state = rec.State
+        if state == "Slot" or state == "Dropped" or (includeCarried and state == "Carried") then
+            if eggMatches(rec) then
+                list[#list + 1] = rec
+            end
+        end
+    end
+    return list
+end
+
+local function sortCandidates(list)
+    local priority = State.Priority
+    table.sort(list, function(a, b)
+        if priority == "Best Rarity" then
+            return Util.assetRarity(a.AssetCategory) > Util.assetRarity(b.AssetCategory)
+        end
+        if priority == "Biggest Weight" then
+            return (a.AssetScale or 0) > (b.AssetScale or 0)
+        end
+        if priority == "Lowest Value" then
+            return Util.assetIncome(a.AssetCategory, a.AssetScale or 1) < Util.assetIncome(b.AssetCategory, b.AssetScale or 1)
+        end
+        -- highest value
+        return Util.assetIncome(a.AssetCategory, a.AssetScale or 1) > Util.assetIncome(b.AssetCategory, b.AssetScale or 1)
+    end)
+end
+
+-- ============================================================================
+-- Steal logic
+-- ============================================================================
+local function tryCarryEgg(rec)
+    local es = Modules.EggState
+    if type(es) == "table" and type(es.CarryFieldEgg) == "function" then
+        pcall(es.CarryFieldEgg, rec.Uid)
+    end
+    -- also try proximity prompt on the nearest SmartPromptPart
+    local pos = rec.BottomCFrame and rec.BottomCFrame.Position or nil
+    if pos and type(fireproximityprompt) == "function" then
+        for _, child in ipairs(workspace:GetChildren()) do
+            if child.Name == "SmartPromptPart" and child:IsA("BasePart") then
+                local prompt = child:FindFirstChild("CarryAreaEgg")
+                if prompt and prompt:IsA("ProximityPrompt") then
+                    if (child.Position - pos).Magnitude < 6 then
+                        pcall(function() prompt.HoldDuration = 0 end)
+                        pcall(fireproximityprompt, prompt)
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+local StealWorker = nil
+
+local function stealOneEgg(rec, shouldStop)
+    if not Movement.claim("steal") then return false end
+
+    local root = Util.root()
+    if not root then Movement.release("steal"); return false end
+
+    local pos = rec.BottomCFrame and rec.BottomCFrame.Position or nil
+    if not pos then Movement.release("steal"); return false end
+
+    -- Walk toward the egg
+    local humanoid = Util.humanoid()
+    if not humanoid then Movement.release("steal"); return false end
+
+    local function moveToward(target, timeout)
+        local start = os.clock()
+        while os.clock() - start < timeout do
+            if shouldStop and shouldStop() then return false end
+            local r = Util.root()
+            if not r then return false end
+            if (r.Position - target).Magnitude <= 4 then return true end
+            humanoid:MoveTo(target)
+            RunService.Heartbeat:Wait()
+        end
+        return (Util.root() and (Util.root().Position - target).Magnitude <= 5) or false
+    end
+
+    -- Teleport close if far
+    if Util.distanceTo(pos) > 40 then
+        local r = Util.root()
+        if r then
+            pcall(function()
+                r.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+                r.AssemblyLinearVelocity = Vector3.zero
+            end)
+        end
+    else
+        moveToward(pos, 6)
+    end
+
+    -- Attempt grab
+    tryCarryEgg(rec)
+
+    -- Wait for carrying flag
+    local start = os.clock()
+    while os.clock() - start < 2 do
+        if shouldStop and shouldStop() then break end
+        local s = Util.saveGet()
+        -- Check via EggState
+        local carried = false
+        if s and s.CarryUid == rec.Uid then carried = true end
+        local es = Modules.EggState
+        if es and type(es.ReadOwnerEggs) == "function" then
+            local recs = Util.readOwnerEggs()
+            for k, v in pairs(recs) do
+                if k == rec.Uid then carried = true; break end
+            end
+        end
+        if carried then
+            State.Steal.CarryUid = rec.Uid
+            State.Steal.Carrying = true
+            break
+        end
+        RunService.Heartbeat:Wait()
+    end
+
+    -- Deliver: fly home
+    if State.Steal.Carrying then
+        local home = Util.stealHome()
+        local r = Util.root()
+        if r and home then
+            local start = os.clock()
+            while os.clock() - start < 20 do
+                if shouldStop and shouldStop() then break end
+                local r2 = Util.root()
+                if not r2 then break end
+                local delta = home - r2.Position
+                if delta.Magnitude < 6 then break end
+                pcall(function()
+                    r2.CFrame = r2.CFrame + delta.Unit * math.min(400 * RunService.Heartbeat:Wait(), delta.Magnitude)
+                    r2.AssemblyLinearVelocity = Vector3.zero
+                end)
+            end
+        end
+    end
+
+    Movement.release("steal")
+    State.Steal.Carrying = false
+    State.Steal.LastFinished = os.clock()
+    return true
+end
+
+-- ============================================================================
+-- Farm tab — Auto Steal
+-- ============================================================================
+do
+    local sec = TabFarm:CreateSection({ Name = "Auto Steal", Side = "Left" })
+
+    -- Areas list
+    local areaList = {
+        "Forest", "Desert", "Snow", "Lake", "Jungle", "Volcano",
+        "Prehistoric", "Cosmic", "Abyss Ocean", "Cherry Blossom",
+        "Light Dark", "Titan Temple",
+    }
+    local areaDefaults = table.clone(areaList)
+
+    local areaToggle = sec:AddMultiDropdown({
+        Name     = "Target Areas",
+        Options  = areaList,
+        Default  = areaDefaults,
+        Callback = function(selected)
+            local s = {}
+            if type(selected) == "table" then
+                for k, v in pairs(selected) do
+                    if v == true and type(k) == "string" then s[k] = true
+                    elseif type(v) == "string" then s[v] = true end
+                end
+            end
+            if next(s) == nil then
+                for _, v in ipairs(areaList) do s[v] = true end
+            end
+            State.Areas = s
+        end,
+    })
+
+    -- Rarity dropdown
+    local rarityOptions = { "Any" }
+    local rarityMap = { Any = 0 }
+    do
+        local seen = {}
+        local assets = Modules.Assets
+        if type(assets) == "table" and type(assets.Directory) == "table" then
+            for _, info in pairs(assets.Directory) do
+                local rar = type(info) == "table" and type(info.Rarity) == "table" and info.Rarity or nil
+                local num = rar and tonumber(rar.RarityNumber or rar.Rank)
+                if num and not seen[num] then
+                    seen[num] = tostring(rar.DisplayName or rar._id or num)
+                end
+            end
+        end
+        if next(seen) == nil then
+            seen = { 1, "Common"; 2, "Uncommon"; 3, "Rare"; 4, "Epic"; 5, "Legendary"; 6, "Mythic" }
+        end
+        local sorted = {}
+        for k in pairs(seen) do sorted[#sorted + 1] = k end
+        table.sort(sorted)
+        for _, k in ipairs(sorted) do
+            local name = string.format("%d - %s", k, seen[k])
+            rarityOptions[#rarityOptions + 1] = name
+            rarityMap[name] = k
+        end
+    end
+
+    sec:AddDropdown({
+        Name     = "Min Rarity",
+        Options  = rarityOptions,
+        Default  = rarityOptions[1],
+        Callback = function(sel)
+            State.MinRarity = rarityMap[sel] or 0
+        end,
+    })
+
+    sec:AddInput({
+        Name        = "Min Steal Value",
+        Placeholder = "e.g. 250k, 50m, 1.5b",
+        Default     = "",
+        Callback    = function(text, entered)
+            if not entered then return end
+            local s = tostring(text):lower():gsub("%s", "")
+            local num, suffix = string.match(s, "^([%d%.]+)([kmbt]?)$")
+            num = tonumber(num)
+            if not num then State.MinValue = 0; return end
+            local mult = ({ k = 1e3, m = 1e6, b = 1e9, t = 1e12 })[suffix] or 1
+            State.MinValue = num * mult
+        end,
+    })
+
+    -- Specific eggs
+    local specificList, specificMap = {}, {}
+    do
+        local assets = Modules.Assets
+        local entries = {}
+        if type(assets) == "table" and type(assets.Directory) == "table" then
+            for k, info in pairs(assets.Directory) do
+                local rar = type(info) == "table" and type(info.Rarity) == "table" and info.Rarity or nil
+                local num = rar and tonumber(rar.RarityNumber or rar.Rank)
+                if num then
+                    entries[#entries + 1] = {
+                        cat = tostring(k),
+                        name = tostring(info.DisplayName or k),
+                        rar = num,
+                        rarName = tostring(rar.DisplayName or rar._id or num),
+                    }
+                end
+            end
+        end
+        table.sort(entries, function(a, b)
+            if a.rar ~= b.rar then return a.rar > b.rar end
+            return a.name < b.name
+        end)
+        for _, e in ipairs(entries) do
+            local label = string.format("%s [%s]", e.name, e.rarName)
+            if specificMap[label] then
+                label = string.format("%s [%s] (%s)", e.name, e.rarName, e.cat)
+            end
+            specificList[#specificList + 1] = label
+            specificMap[label] = e.cat
+        end
+    end
+
+    if #specificList > 0 then
+        sec:AddMultiDropdown({
+            Name     = "Target Specific Eggs",
+            Options  = specificList,
+            Default  = {},
+            Callback = function(sel)
+                local out = {}
+                if type(sel) == "table" then
+                    for k, v in pairs(sel) do
+                        if v == true and specificMap[k] then out[specificMap[k]] = true
+                        elseif type(v) == "string" and specificMap[v] then out[specificMap[v]] = true end
+                    end
+                end
+                State.SpecificEggs = out
+            end,
+        })
+    end
+
+    sec:AddDropdown({
+        Name     = "Steal Priority",
+        Options  = { "Highest Value", "Best Rarity", "Biggest Weight", "Lowest Value" },
+        Default  = "Highest Value",
+        Callback = function(sel) State.Priority = sel end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Steal",
+        Default  = false,
+        Callback = function(on)
+            State.Steal.Enabled = on == true
+            if not on then
+                State.Steal.Carrying = false
+                State.Steal.CarryUid = nil
+            end
+        end,
+    })
+end
+
+-- ============================================================================
+-- Farm tab — Auto Place Egg
+-- ============================================================================
+do
+    local sec = TabFarm:CreateSection({ Name = "Auto Place Egg", Side = "Right" })
+
+    local statusRow
+    statusRow = sec:AddLabel("Pen status unknown")
+
+    sec:AddDropdown({
+        Name     = "Place Egg Rule",
+        Options  = { "Always", "After Steal", "Night Only" },
+        Default  = "Always",
+        Callback = function(sel) State.Place.Rule = sel end,
+    })
+
+    sec:AddDropdown({
+        Name     = "Place Egg Order",
+        Options  = { "Highest Value", "Biggest Size", "Backpack Order" },
+        Default  = "Highest Value",
+        Callback = function(sel) State.Place.Order = sel end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Place Egg",
+        Default  = false,
+        Callback = function(on) State.Place.Enabled = on == true end,
+    })
+end
+
+-- ============================================================================
+-- Farm tab — Auto Hatch
+-- ============================================================================
+do
+    local sec = TabFarm:CreateSection({ Name = "Auto Hatch", Side = "Right" })
+
+    sec:AddToggle({
+        Name     = "Auto Hatch",
+        Default  = false,
+        Callback = function(on) State.Hatch.Enabled = on == true end,
+    })
+
+    sec:AddSlider({
+        Name     = "Hatch Delay (s)",
+        Min      = 0,
+        Max      = 3,
+        Default  = 0.35,
+        Callback = function(v) State.Hatch.Delay = tonumber(v) or 0.35 end,
+    })
+end
+
+-- ============================================================================
+-- Farm tab — Auto Sell
+-- ============================================================================
+do
+    local sec = TabFarm:CreateSection({ Name = "Auto Sell", Side = "Right" })
+
+    sec:AddToggle({
+        Name     = "Auto Sell Egg",
+        Default  = false,
+        Callback = function(on) State.SellEgg.Enabled = on == true end,
+    })
+
+    sec:AddToggle({
+        Name     = "Keep Mutated Eggs",
+        Default  = true,
+        Callback = function(on) State.SellEgg.KeepMutated = on ~= false end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Sell Pet",
+        Default  = false,
+        Callback = function(on) State.SellPet.Enabled = on == true end,
+    })
+
+    sec:AddToggle({
+        Name     = "Keep Mutated Pets",
+        Default  = true,
+        Callback = function(on) State.SellPet.KeepMutated = on ~= false end,
+    })
+end
+
+-- ============================================================================
+-- Farm tab — Auto Treadmill
+-- ============================================================================
+do
+    local sec = TabFarm:CreateSection({ Name = "Auto Treadmill", Side = "Right" })
+
+    sec:AddToggle({
+        Name     = "Auto Treadmill",
+        Default  = false,
+        Callback = function(on) State.Treadmill.Enabled = on == true end,
+    })
+
+    sec:AddToggle({
+        Name     = "Stay On Treadmill",
+        Default  = true,
+        Callback = function(on) State.Treadmill.Stay = on ~= false end,
+    })
+end
+
+-- ============================================================================
+-- Progress tab
+-- ============================================================================
+do
+    local sec = TabProgress:CreateSection({ Name = "Auto Progression", Side = "Left" })
+
+    sec:AddToggle({
+        Name     = "Auto Buy Trail",
+        Default  = false,
+        Callback = function(on) State.BuyTrail = on == true end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Upgrade Base",
+        Default  = false,
+        Callback = function(on) State.UpgradeBase = on == true end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Upgrade Treadmill",
+        Default  = false,
+        Callback = function(on) State.UpgradeTreadmill = on == true end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Claim",
+        Default  = false,
+        Callback = function(on) State.AutoClaim = on == true end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Claim Index",
+        Default  = false,
+        Callback = function(on) State.AutoClaimIndex = on == true end,
+    })
+end
+
+-- ============================================================================
+-- Player tab
+-- ============================================================================
+do
+    local moveSec = TabPlayer:CreateSection({ Name = "Movement", Side = "Left" })
+    local charSec = TabPlayer:CreateSection({ Name = "Character", Side = "Left" })
+    local combSec = TabPlayer:CreateSection({ Name = "Combat / Anti", Side = "Right" })
+
+    -- Speed boost
+    local speedConn
+    local function enableSpeed()
+        if speedConn then return end
+        speedConn = RunService.Heartbeat:Connect(function()
+            local hum = Util.humanoid()
+            local root = Util.root()
+            if not hum or not root then return end
+            local dir = hum.MoveDirection
+            if dir.Magnitude < 0.01 then return end
+            local vel = dir.Unit * State.SpeedValue
+            pcall(function()
+                root.AssemblyLinearVelocity = Vector3.new(vel.X, root.AssemblyLinearVelocity.Y, vel.Z)
+            end)
+        end)
+    end
+    local function disableSpeed()
+        if speedConn then speedConn:Disconnect(); speedConn = nil end
+    end
+
+    moveSec:AddToggle({
+        Name     = "Speed Boost",
+        Default  = false,
+        Callback = function(on)
+            State.SpeedBoost = on == true
+            if on then enableSpeed() else disableSpeed() end
+        end,
+    })
+
+    moveSec:AddSlider({
+        Name     = "Boost Speed",
+        Min      = 20,
+        Max      = 1000,
+        Default  = 350,
+        Callback = function(v) State.SpeedValue = math.clamp(tonumber(v) or 350, 20, 1000) end,
+    })
+
+    -- Infinite jump
+    local jumpConn
+    moveSec:AddToggle({
+        Name     = "Infinite Jump",
+        Default  = false,
+        Callback = function(on)
+            State.InfiniteJump = on == true
+            if on and not jumpConn then
+                jumpConn = UserInputService.JumpRequest:Connect(function()
+                    local hum = Util.humanoid()
+                    if hum then
+                        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+                    end
+                end)
+            elseif not on and jumpConn then
+                jumpConn:Disconnect()
+                jumpConn = nil
+            end
+        end,
+    })
+
+    -- Anti-ragdoll
+    local ragConn
+    charSec:AddToggle({
+        Name     = "Anti Ragdoll",
+        Default  = true,
+        Callback = function(on)
+            State.AntiRagdoll = on ~= false
+            if on and not ragConn then
+                ragConn = RunService.Heartbeat:Connect(function()
+                    if not State.AntiRagdoll then return end
+                    local hum = Util.humanoid()
+                    if not hum then return end
+                    local state = hum:GetState()
+                    if state == Enum.HumanoidStateType.Physics
+                        or state == Enum.HumanoidStateType.Ragdoll
+                        or state == Enum.HumanoidStateType.FallingDown then
+                        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+                    end
+                    if hum.PlatformStand then
+                        hum.PlatformStand = false
+                    end
+                end)
+            elseif not on and ragConn then
+                ragConn:Disconnect()
+                ragConn = nil
+            end
+        end,
+    })
+
+    -- Anti-trap
+    charSec:AddToggle({
+        Name     = "Anti Trap",
+        Default  = true,
+        Callback = function(on)
+            State.AntiTrap = on ~= false
+            if State.AntiTrap then
+                for _, inst in ipairs(CollectionService:GetTagged("PlacedTrap")) do
+                    for _, desc in ipairs(inst:GetDescendants()) do
+                        if desc:IsA("BasePart") then pcall(function() desc.CanTouch = false end) end
+                    end
+                    if inst:IsA("BasePart") then pcall(function() inst.CanTouch = false end) end
+                end
+            end
+        end,
+    })
+
+    -- Invisibility toggle (best-effort)
+    charSec:AddToggle({
+        Name     = "Invisibility",
+        Default  = false,
+        Callback = function(on)
+            State.Invisibility = on == true
+            if not on then
+                pcall(function()
+                    LocalPlayer.Character:SetAttribute("InvisApplied", false)
+                end)
+            end
+        end,
+    })
+
+    -- Anti-guard
+    combSec:AddToggle({
+        Name     = "Anti Guard",
+        Default  = false,
+        Callback = function(on) State.AntiGuard = on == true end,
+    })
+
+    combSec:AddToggle({
+        Name     = "Anti AFK",
+        Default  = true,
+        Callback = function(on) State.AntiAfk = on ~= false end,
+    })
+end
+
+-- ============================================================================
+-- Visuals tab (ESP)
+-- ============================================================================
+do
+    local sec = TabVisuals:CreateSection({ Name = "ESP", Side = "Left" })
+
+    local function espInstanceLookup()
+        local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not playerGui then return nil end
+        local gui = playerGui:FindFirstChild("LHubEsp")
+        if not gui then
+            gui = Instance.new("ScreenGui")
+            gui.Name = "LHubEsp"
+            gui.ResetOnSpawn = false
+            gui.IgnoreGuiInset = true
+            gui.DisplayOrder = 40
+            gui.Parent = playerGui
+        end
+        return gui
+    end
+
+    -- ESP Eggs
+    local eggTags = {}
+    local function clearEggEsp()
+        for _, tag in pairs(eggTags) do
+            if tag.Parent then tag:Destroy() end
+        end
+        table.clear(eggTags)
+    end
+
+    local function updateEggEsp()
+        if not State.EspEggs then
+            clearEggEsp()
+            return
+        end
+        local gui = espInstanceLookup()
+        if not gui then return end
+
+        local records = Util.readFieldEggs() or {}
+        local seen = {}
+
+        for uid, rec in pairs(records) do
+            if type(rec) == "table" and rec.BottomCFrame and type(rec.BottomCFrame) == "CFrame" then
+                local rarity = Util.assetRarity(rec.AssetCategory)
+                if rarity >= State.EspEggMinRarity then
+                    seen[uid] = true
+                    local tag = eggTags[uid]
+                    if not tag then
+                        tag = Instance.new("BillboardGui")
+                        tag.Name = "EggTag"
+                        tag.Size = UDim2.fromOffset(160, 30)
+                        tag.AlwaysOnTop = true
+                        tag.Adornee = workspace.Terrain
+                        tag.StudsOffsetWorldSpace = rec.BottomCFrame.Position - workspace.Terrain.Position + Vector3.new(0, 3, 0)
+                        tag.Parent = gui
+
+                        local lbl = Instance.new("TextLabel")
+                        lbl.Size = UDim2.fromScale(1, 1)
+                        lbl.BackgroundTransparency = 0.3
+                        lbl.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+                        lbl.TextScaled = true
+                        lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+                        lbl.Font = Enum.Font.GothamBold
+                        lbl.Text = ""
+                        lbl.Parent = tag
+
+                        local corner = Instance.new("UICorner")
+                        corner.CornerRadius = UDim.new(0, 4)
+                        corner.Parent = lbl
+
+                        tag._lbl = lbl
+                        eggTags[uid] = tag
+                    end
+                    local income = Util.assetIncome(rec.AssetCategory, rec.AssetScale or 1)
+                    tag._lbl.Text = string.format("%s  x%.2f  $%d/s",
+                        Util.assetName(rec.AssetCategory),
+                        rec.AssetScale or 1,
+                        math.floor(income))
+                    tag.StudsOffsetWorldSpace = rec.BottomCFrame.Position - workspace.Terrain.Position + Vector3.new(0, 3, 0)
+                end
+            end
+        end
+
+        for uid, tag in pairs(eggTags) do
+            if not seen[uid] then
+                tag:Destroy()
+                eggTags[uid] = nil
+            end
+        end
+    end
+
+    sec:AddToggle({
+        Name     = "ESP Eggs",
+        Default  = false,
+        Callback = function(on)
+            State.EspEggs = on == true
+            task.spawn(updateEggEsp)
+        end,
+    })
+
+    -- ESP Guards
+    local guardTags = {}
+    local function clearGuardEsp()
+        for _, tag in pairs(guardTags) do
+            if tag.Parent then tag:Destroy() end
+        end
+        table.clear(guardTags)
+    end
+
+    local function updateGuardEsp()
+        if not State.EspGuards then clearGuardEsp(); return end
+        local gui = espInstanceLookup()
+        if not gui then return end
+        local world = workspace:FindFirstChild("World") or workspace:FindFirstChild("__OBJECTS")
+        local areas = world and world:FindFirstChild("Areas")
+        local guardAreas = areas and areas:FindFirstChild("GuardAreas")
+        if not guardAreas then return end
+
+        local seen = {}
+        for _, area in ipairs(guardAreas:GetChildren()) do
+            local guard = area:FindFirstChild("Guard")
+            if guard and guard:IsA("Model") then
+                local root = guard:FindFirstChild("HumanoidRootPart") or guard.PrimaryPart
+                if root then
+                    seen[guard] = true
+                    local tag = guardTags[guard]
+                    if not tag then
+                        tag = Instance.new("BillboardGui")
+                        tag.Size = UDim2.fromOffset(160, 26)
+                        tag.AlwaysOnTop = true
+                        tag.Adornee = root
+                        tag.StudsOffsetWorldSpace = Vector3.new(0, 4, 0)
+                        tag.Parent = gui
+
+                        local lbl = Instance.new("TextLabel")
+                        lbl.Size = UDim2.fromScale(1, 1)
+                        lbl.BackgroundTransparency = 0.3
+                        lbl.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+                        lbl.TextScaled = true
+                        lbl.TextColor3 = Color3.fromRGB(255, 200, 100)
+                        lbl.Font = Enum.Font.GothamBold
+                        lbl.Parent = tag
+                        tag._lbl = lbl
+                        guardTags[guard] = tag
+                    end
+                    local st = guard:GetAttribute("GuardState") or "Awake"
+                    tag._lbl.Text = string.format("%s Guard [%s]", area.Name, tostring(st))
+                end
+            end
+        end
+
+        for g, tag in pairs(guardTags) do
+            if not seen[g] then tag:Destroy(); guardTags[g] = nil end
+        end
+    end
+
+    sec:AddToggle({
+        Name     = "ESP Guards",
+        Default  = false,
+        Callback = function(on)
+            State.EspGuards = on == true
+            task.spawn(updateGuardEsp)
+        end,
+    })
+
+    -- ESP Players
+    local playerTags = {}
+    local function clearPlayerEsp()
+        for _, tag in pairs(playerTags) do
+            if tag.Parent then tag:Destroy() end
+        end
+        table.clear(playerTags)
+    end
+
+    local function updatePlayerEsp()
+        if not State.EspPlayers then clearPlayerEsp(); return end
+        local gui = espInstanceLookup()
+        if not gui then return end
+        local seen = {}
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                local char = plr.Character
+                local head = char and char:FindFirstChild("Head")
+                if head then
+                    seen[plr] = true
+                    local tag = playerTags[plr]
+                    if not tag then
+                        tag = Instance.new("BillboardGui")
+                        tag.Size = UDim2.fromOffset(160, 24)
+                        tag.AlwaysOnTop = true
+                        tag.Adornee = head
+                        tag.StudsOffsetWorldSpace = Vector3.new(0, 3, 0)
+                        tag.Parent = gui
+
+                        local lbl = Instance.new("TextLabel")
+                        lbl.Size = UDim2.fromScale(1, 1)
+                        lbl.BackgroundTransparency = 0.4
+                        lbl.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+                        lbl.TextScaled = true
+                        lbl.TextColor3 = Color3.fromRGB(120, 220, 255)
+                        lbl.Font = Enum.Font.GothamBold
+                        lbl.Parent = tag
+                        tag._lbl = lbl
+                        playerTags[plr] = tag
+                    end
+                    tag._lbl.Text = plr.DisplayName
+                end
+            end
+        end
+        for p, tag in pairs(playerTags) do
+            if not seen[p] then tag:Destroy(); playerTags[p] = nil end
+        end
+    end
+
+    sec:AddToggle({
+        Name     = "ESP Players",
+        Default  = false,
+        Callback = function(on)
+            State.EspPlayers = on == true
+            task.spawn(updatePlayerEsp)
+        end,
+    })
+
+    -- Single global heartbeat drives all ESP
+    RunService.Heartbeat:Connect(function()
+        if State.EspEggs    then pcall(updateEggEsp) end
+        if State.EspGuards  then pcall(updateGuardEsp) end
+        if State.EspPlayers then pcall(updatePlayerEsp) end
+    end)
+end
+
+-- ============================================================================
+-- Server tab
+-- ============================================================================
+do
+    local sec = TabServer:CreateSection({ Name = "Server", Side = "Left" })
+
+    local hopOptions = { "Least Players", "Most Players", "Random" }
+
+    sec:AddDropdown({
+        Name     = "Server Hop Mode",
+        Options  = hopOptions,
+        Default  = "Least Players",
+        Callback = function(sel) State.HopMode = sel end,
+    })
+
+    local function fetchServers(sortOrder)
+        local list = {}
+        local ok, res = pcall(function()
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&excludeFullGames=true&limit=100",
+                game.PlaceId, sortOrder)
+            return HttpService:JSONDecode(game:HttpGet(url))
+        end)
+        if not ok or type(res) ~= "table" or type(res.data) ~= "table" then return list end
+        for _, srv in ipairs(res.data) do
+            if srv.id and srv.id ~= game.JobId and (srv.playing or 0) < (srv.maxPlayers or 0) then
+                list[#list + 1] = {
+                    Id       = tostring(srv.id),
+                    Playing  = tonumber(srv.playing) or 0,
+                    Room     = (tonumber(srv.maxPlayers) or 0) - (tonumber(srv.playing) or 0),
+                }
+            end
+        end
+        return list
+    end
+
+    sec:AddButton({
+        Name     = "Server Hop",
+        Callback = function()
+            local mode = State.HopMode
+            local order = mode == "Least Players" and "Asc" or "Desc"
+            local servers = fetchServers(order)
+            if #servers == 0 then
+                Util.notify("Server Hop", "No servers found.")
+                return
+            end
+            table.sort(servers, function(a, b)
+                if mode == "Least Players" then return a.Playing < b.Playing end
+                if mode == "Most Players"  then return a.Playing > b.Playing end
+                return false
+            end)
+            local target = mode == "Random" and servers[math.random(1, #servers)] or servers[1]
+            Util.notify("Server Hop", "Joining " .. target.Id:sub(1, 8))
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, target.Id, LocalPlayer)
+            end)
+        end,
+    })
+
+    sec:AddButton({
+        Name     = "Rejoin Server",
+        Callback = function()
+            pcall(function()
+                if game.JobId ~= "" then
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+                else
+                    TeleportService:Teleport(game.PlaceId, LocalPlayer)
+                end
+            end)
+        end,
+    })
+
+    sec:AddToggle({
+        Name     = "Auto Rejoin When Disconnect",
+        Default  = true,
+        Callback = function(on) State.RejoinOnDC = on ~= false end,
+    })
+end
+
+-- ============================================================================
+-- Misc tab
+-- ============================================================================
+do
+    local perfSec = TabMisc:CreateSection({ Name = "Performance", Side = "Left" })
+    local utilSec = TabMisc:CreateSection({ Name = "Utility",     Side = "Right" })
+
+    perfSec:AddSlider({
+        Name     = "FPS Cap",
+        Min      = 30,
+        Max      = 1000,
+        Default  = 240,
+        Callback = function(v)
+            local n = math.clamp(math.floor(tonumber(v) or 240), 30, 1000)
+            State.FpsCap = n
+            if type(setfpscap) == "function" then pcall(setfpscap, n) end
+        end,
+    })
+
+    perfSec:AddToggle({
+        Name     = "Optimizer",
+        Default  = false,
+        Callback = function(on) State.Optimizer = on == true end,
+    })
+
+    utilSec:AddToggle({
+        Name     = "Anti AFK",
+        Default  = true,
+        Callback = function(on) State.AntiAfk = on ~= false end,
+    })
+end
+
+-- ============================================================================
+-- Background workers
+-- ============================================================================
+
+-- Steal worker
+task.spawn(function()
+    while true do
+        if State.Steal.Enabled and not State.Steal.Carrying then
+            local list = collectCandidates(false)
+            sortCandidates(list)
+            local target = list[1]
+            if target then
+                local ok = pcall(stealOneEgg, target, function()
+                    return not State.Steal.Enabled
+                end)
+                if not ok then
+                    task.wait(1)
+                end
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- Treadmill worker
+task.spawn(function()
+    while true do
+        if State.Treadmill.Enabled and not State.Treadmill.Riding then
+            local plot = nil
+            do
+                local plots = workspace:FindFirstChild("Plots")
+                if plots then
+                    for _, child in ipairs(plots:GetChildren()) do
+                        local sign = child:FindFirstChild("PlotSign")
+                        sign = sign and sign:FindFirstChild("PlayerPlotSign")
+                        sign = sign and sign:FindFirstChild("Frame")
+                        sign = sign and sign:FindFirstChild("PlayerName")
+                        if sign and sign:IsA("TextLabel") then
+                            local t = string.lower(sign.Text)
+                            if t == string.lower(LocalPlayer.Name) or t == string.lower(LocalPlayer.DisplayName) then
+                                plot = child
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            if plot then
+                local belt = plot:FindFirstChild("TreadmillBottom")
+                if belt and belt:IsA("BasePart") then
+                    local root = Util.root()
+                    if root and (root.Position - belt.Position).Magnitude > 6 then
+                        pcall(function()
+                            root.CFrame = CFrame.new(belt.Position + Vector3.new(0, 4, 0))
+                            root.AssemblyLinearVelocity = Vector3.zero
+                        end)
+                    end
+                    pcall(function()
+                        Util.invoke("RF/Treadmill/AskWearStill")
+                    end)
+                    State.Treadmill.Riding = true
+                    task.wait(3)
+                    State.Treadmill.Riding = false
+                end
+            end
+        end
+        task.wait(1)
+    end
+end)
+
+-- Hatch worker
+task.spawn(function()
+    while true do
+        if State.Hatch.Enabled then
+            local owned = Util.readOwnerEggs()
+            local es = Modules.EggState
+            for uid, rec in pairs(owned) do
+                if type(rec) == "table" and rec.Placement ~= nil then
+                    local ready = false
+                    if es and type(es.IsReadyToHatch) == "function" then
+                        local ok, res = pcall(es.IsReadyToHatch, uid)
+                        ready = ok and res == true
+                    end
+                    if ready then
+                        local rarity = Util.assetRarity(rec.AssetCategory)
+                        if State.Hatch.MinRarity == 0 or rarity >= State.Hatch.MinRarity then
+                            Util.invoke("RF/EggWorld/AskHatch", uid)
+                            task.wait(0.35)
+                            Util.invoke("RF/EggWorld/AskFinishHatch", uid)
+                            task.wait(State.Hatch.Delay or 0.35)
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(2)
+    end
+end)
+
+-- Sell worker
+task.spawn(function()
+    while true do
+        if State.SellEgg.Enabled then
+            local owned = Util.readOwnerEggs()
+            local toSell = {}
+            for uid, rec in pairs(owned) do
+                if type(rec) == "table" and rec.Placement == nil then
+                    local mut = type(rec.Mutations) == "table" and next(rec.Mutations) ~= nil
+                    if not (State.SellEgg.KeepMutated and mut) then
+                        local rarity = Util.assetRarity(rec.AssetCategory)
+                        local maxR = State.SellEgg.MaxRarity
+                        if maxR == 0 or rarity <= maxR then
+                            toSell[#toSell + 1] = uid
+                        end
+                    end
+                end
+            end
+            if #toSell > 0 then
+                -- PetSatchel sell accepts Eggs
+                local batches = {}
+                for i = 1, #toSell, 50 do
+                    local chunk = {}
+                    for j = i, math.min(i + 49, #toSell) do
+                        chunk[#chunk + 1] = toSell[j]
+                    end
+                    batches[#batches + 1] = chunk
+                end
+                for _, batch in ipairs(batches) do
+                    Util.fire("RE/PetSatchel/SellSelection", { Eggs = batch, Assets = {} })
+                    task.wait(0.4)
+                end
+            end
+        end
+        task.wait(3)
+    end
+end)
+
+-- Progression worker
+task.spawn(function()
+    while true do
+        if State.AutoClaim then
+            pcall(function() Util.invoke("RF/AwayEarnings/PendingCheck") end)
+            pcall(function() Util.invoke("RF/AwayEarnings/AskCollect") end)
+            pcall(function() Util.invoke("RF/Codex/AskRedeemAll") end)
+        end
+        if State.AutoClaimIndex then
+            pcall(function() Util.invoke("RF/Codex/AskRedeemAll") end)
+        end
+        task.wait(15)
+    end
+end)
+
+-- Anti-AFK
+task.spawn(function()
+    while true do
+        if State.AntiAfk then
+            pcall(function()
+                if typeof(getconnections) == "function" then
+                    for _, c in ipairs(getconnections(LocalPlayer.Idled)) do
+                        pcall(function() c:Disable() end)
+                    end
+                end
+            end)
+        end
+        task.wait(120)
+    end
+end)
+
+-- Auto rejoin
+do
+    local fired = false
+    pcall(function()
+        game:GetService("GuiService").ErrorMessageChanged:Connect(function(msg)
+            if fired or not State.RejoinOnDC then return end
+            local text = string.lower(tostring(msg or ""))
+            if text == "" or text:find("teleport", 1, true) then return end
+            fired = true
+            Util.notify("Auto Rejoin", "Disconnected, rejoining…")
+            task.spawn(function()
+                while true do
+                    pcall(function()
+                        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+                    end)
+                    task.wait(5)
+                end
+            end)
+        end)
+    end)
+end
+
+-- ============================================================================
+-- Ready
+-- ============================================================================
+Util.notify("L Hub", "Loaded. Tabs: Farm, Player, Visuals, Progress, Server, Misc.", 5)
+print("[L Hub] Loaded successfully")
