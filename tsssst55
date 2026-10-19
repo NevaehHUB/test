@@ -102,7 +102,7 @@ Config.defaults = {
 		gear = true, -- wear the hardest-hitting gear during a run
 	},
 	misc = { antiAfk = false, lowGraphics = false, autoRejoin = false, telemetry = false, telemetryInterval = 300 },
-	ui = { scale = 1, key = "RightShift", lang = "TH", theme = "Yellow", customColor = { r = 255, g = 204, b = 0 } },
+	ui = { scale = 1, key = "RightShift", lang = "En", theme = "Yellow", customColor = { r = 255, g = 204, b = 0 } },
 	-- auto hop: when more than whenPlayersOver players, or every everyMinutes (0 = off)
 	hop = { enabled = false, interval = 60, mode = "smallest", whenPlayersOver = 0, everyMinutes = 0 },
 }
